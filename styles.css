@@ -192,6 +192,69 @@ input { font: inherit; }
 /* Marcador da posição do militar */
 .minha-pos { width: 18px; height: 18px; border-radius: 50%; background: #1e88e5; border: 3px solid #fff; box-shadow: 0 0 0 2px rgba(30,136,229,.35), 0 1px 4px rgba(0,0,0,.4); }
 
+/* ---------------- Coleta em campo ---------------- */
+.btn-adicionar { background: var(--ambar); color: #1d2a22; }
+.btn-adicionar:active { background: #e09d1c; }
+.painel.alto { max-height: 92vh; }
+.status-chip .pendentes {
+  background: var(--ambar); color: #1d2a22; font-weight: 700;
+  border-radius: 10px; padding: 1px 8px; margin-left: 2px; white-space: nowrap;
+}
+.selo.pend { background: #fff0c2; color: #7a5200; }
+.bolinha-in { display: inline-block; width: 12px; height: 12px; border-radius: 50%; }
+.acoes-topo { margin-top: 12px; }
+.alerta.perigo { background: #fdecec; border-left-color: var(--erro); }
+.rodape-ficha { color: var(--texto-2); font-size: .78rem; margin: 14px 0 0; line-height: 1.5; }
+.vazio-txt { color: var(--texto-2); font-weight: 400; }
+.dica { color: var(--texto-2); font-size: .9rem; margin: 4px 0 10px; line-height: 1.4; }
+
+.marca-ponto {
+  width: 24px; height: 24px; border-radius: 7px; border: 2px solid #fff;
+  color: #fff; font: 800 13px/20px system-ui, sans-serif; text-align: center;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .45);
+}
+.marca-ponto.mini { display: inline-block; width: 20px; height: 20px; font-size: 11px; line-height: 16px; border-radius: 6px; flex: none; }
+.marca-nova {
+  width: 26px; height: 26px; background: var(--ambar); border: 3px solid #fff;
+  border-radius: 50% 50% 50% 0; transform: rotate(-45deg); box-shadow: 0 2px 6px rgba(0,0,0,.45);
+}
+
+form[data-form] h3 { margin-top: 22px; }
+.campo { display: grid; gap: 6px; margin: 12px 0; font-weight: 600; font-size: .92rem; }
+.campo > span { display: block; }
+.campo input:not([type=radio]):not([type=checkbox]), .campo select, .campo textarea {
+  width: 100%; min-height: 48px; padding: 10px 12px; border: 1.5px solid var(--linha);
+  border-radius: 12px; font-size: 1rem; font-weight: 400; background: #f8faf9; color: var(--texto);
+}
+.campo textarea { min-height: 84px; resize: vertical; font-family: inherit; }
+.campo input:focus, .campo select:focus, .campo textarea:focus { outline: none; border-color: var(--verde); background: #fff; }
+.seg3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.seg3 label { position: relative; }
+.seg3 input { position: absolute; opacity: 0; inset: 0; }
+.seg3 span {
+  display: grid; place-items: center; height: 46px; border: 1.5px solid var(--linha);
+  border-radius: 10px; font-weight: 600; background: #fff;
+}
+.seg3 input:checked + span { background: var(--verde); border-color: var(--verde); color: #fff; }
+.seg3 input:focus-visible + span { outline: 2px solid var(--ambar); }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { position: relative; }
+.chip input { position: absolute; opacity: 0; inset: 0; }
+.chip span {
+  display: inline-flex; align-items: center; min-height: 40px; padding: 0 14px;
+  border: 1.5px solid var(--linha); border-radius: 20px; background: #fff; font-weight: 550;
+}
+.chip input:checked + span { background: #e3f3e5; border-color: var(--ok); color: #1b5e20; }
+.chip input:checked + span::before { content: "✓ "; white-space: pre; }
+.chip input:focus-visible + span { outline: 2px solid var(--ambar); }
+.campo .outro { margin-top: 2px; }
+.opcao-form { font-weight: 600; border-top: 1px solid var(--linha); }
+.opcao-form small { font-weight: 400; color: var(--texto-2); }
+form[data-form] .acoes {
+  position: sticky; bottom: -18px; background: var(--fundo);
+  padding: 10px 0 22px; margin-top: 10px; box-shadow: 0 -8px 12px -8px rgba(0, 0, 0, .15);
+}
+
 @media (min-width: 720px) {
   .painel { left: 12px; right: auto; width: 400px; bottom: 12px; border-radius: 20px; max-height: calc(100vh - 100px); }
   .barra-topo { max-width: 480px; }
