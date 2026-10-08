@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1f3d2b">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Patrulha Rural</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- ============ LOGIN ============ -->
+  <section id="tela-login" class="tela tela-auth" hidden>
+    <div class="auth-caixa">
+      <img src="icons/icon-192.png" alt="" class="auth-logo">
+      <h1>Patrulha Rural</h1>
+      <p class="auth-sub">Base de propriedades e vias rurais</p>
+      <form id="form-login" autocomplete="on">
+        <label>Usuário
+          <input id="login-usuario" name="username" autocomplete="username"
+                 autocapitalize="none" spellcheck="false" required>
+        </label>
+        <label>Senha
+          <input id="login-senha" name="password" type="password"
+                 autocomplete="current-password" required>
+        </label>
+        <p id="login-erro" class="erro" role="alert"></p>
+        <button type="submit" class="btn btn-primario" id="btn-entrar">Entrar</button>
+      </form>
+      <p class="auth-nota">É preciso internet no primeiro acesso.<br>Depois o app funciona sem sinal.</p>
+    </div>
+  </section>
+
+  <!-- ============ TROCA DE SENHA ============ -->
+  <section id="tela-senha" class="tela tela-auth" hidden>
+    <div class="auth-caixa">
+      <h1>Defina sua senha</h1>
+      <p class="auth-sub">Primeiro acesso: troque a senha provisória.</p>
+      <form id="form-senha">
+        <label>Senha provisória
+          <input id="senha-atual" type="password" autocomplete="current-password" required>
+        </label>
+        <label>Nova senha (mín. 8 caracteres)
+          <input id="senha-nova" type="password" autocomplete="new-password" minlength="8" required>
+        </label>
+        <label>Repita a nova senha
+          <input id="senha-nova2" type="password" autocomplete="new-password" minlength="8" required>
+        </label>
+        <p id="senha-erro" class="erro" role="alert"></p>
+        <button type="submit" class="btn btn-primario">Salvar senha</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- ============ MAPA ============ -->
+  <section id="tela-mapa" class="tela" hidden>
+    <div id="mapa"></div>
+
+    <header class="barra-topo">
+      <div class="busca">
+        <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 3a7.5 7.5 0 0 1 5.9 12.1l4.2 4.2-1.4 1.4-4.2-4.2A7.5 7.5 0 1 1 10.5 3zm0 2a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11z"/></svg>
+        <input id="busca" type="search" placeholder="Buscar localidade, estrada, fazenda…"
+               autocomplete="off" enterkeyhint="search" aria-label="Buscar">
+        <button id="busca-limpar" class="btn-ico" aria-label="Limpar busca" hidden>
+          <svg class="ico" viewBox="0 0 24 24"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4L12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z"/></svg>
+        </button>
+      </div>
+      <button id="btn-menu" class="btn-redondo" aria-label="Menu">
+        <svg class="ico" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+      </button>
+    </header>
+
+    <div id="status" class="status-chip" aria-live="polite"></div>
+
+    <div class="fabs">
+      <button id="btn-camadas" class="btn-redondo" aria-label="Camadas do mapa">
+        <svg class="ico" viewBox="0 0 24 24"><path d="m12 3 10 5.5-10 5.5L2 8.5zm-7.4 9.2L12 16.3l7.4-4.1 2.6 1.4-10 5.5-10-5.5z"/></svg>
+      </button>
+      <button id="btn-gps" class="btn-redondo btn-gps" aria-label="Minha localização">
+        <svg class="ico" viewBox="0 0 24 24"><path d="M11 2h2v3.1A7 7 0 0 1 18.9 11H22v2h-3.1A7 7 0 0 1 13 18.9V22h-2v-3.1A7 7 0 0 1 5.1 13H2v-2h3.1A7 7 0 0 1 11 5.1zm1 5a5 5 0 1 0 0 10 5 5 0 0 0 0-10zm0 2.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z"/></svg>
+      </button>
+    </div>
+
+    <!-- Painel inferior (resultados, ficha, camadas, menu) -->
+    <div id="painel" class="painel" hidden>
+      <div class="painel-alca" id="painel-alca"></div>
+      <button id="painel-fechar" class="btn-ico painel-x" aria-label="Fechar">
+        <svg class="ico" viewBox="0 0 24 24"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4L12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z"/></svg>
+      </button>
+      <div id="painel-conteudo" class="painel-conteudo"></div>
+    </div>
+
+    <div id="toast" class="toast" role="status" hidden></div>
+  </section>
+
+  <script src="config.js"></script>
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
