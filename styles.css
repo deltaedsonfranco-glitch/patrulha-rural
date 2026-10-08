@@ -192,6 +192,12 @@ input { font: inherit; }
 /* Marcador da posição do militar */
 .minha-pos { width: 18px; height: 18px; border-radius: 50%; background: #1e88e5; border: 3px solid #fff; box-shadow: 0 0 0 2px rgba(30,136,229,.35), 0 1px 4px rgba(0,0,0,.4); }
 
+/* ---------------- v1.2: situação e exclusão ---------------- */
+.segmentado.seg2 { grid-template-columns: 1fr 1fr; }
+.bolinha.bolinha-val { box-shadow: 0 0 0 2px #0b3d1f; border-color: #0b3d1f; }
+.btn-perigo-leve { background: transparent; color: var(--erro); border: 1.5px solid #f3c2c2; font-weight: 600; font-size: .92rem; }
+.btn-perigo-leve:active { background: #fdecec; }
+
 /* ---------------- Coleta em campo ---------------- */
 .btn-adicionar { background: var(--ambar); color: #1d2a22; }
 .btn-adicionar:active { background: #e09d1c; }

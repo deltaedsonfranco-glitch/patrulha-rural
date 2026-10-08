@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  var VERSAO_APP = '1.1.0';
+  var VERSAO_APP = '1.2.0';
   var C = window.CONFIG || {};
 
   var CORES_ESPECIE = {
@@ -16,6 +16,8 @@
     'Imóvel rural (CAR)': '#7cb518'
   };
   var COR_PADRAO = '#6b7a72';
+  var COR_SITUACAO = { VALIDADO: '#00b050', NAO_VALIDADO: '#8d99a6' };
+  var MOTIVOS_EXCLUSAO = ['Não existe / demolido', 'Duplicado', 'Não encontrado no local', 'Outro'];
   var COR_VIA = '#ff8a00';
 
   var OPCOES = {
@@ -200,13 +202,14 @@
     render: null,
     bases: {},
     baseAtual: null,
-    gruposEspecie: {},
+    grupoProps: null,
     grupoVias: null,
     grupoPontos: null,
     destaque: null,
     marcaLocal: null,
     gps: { watch: null, seguir: false, pos: null, marcador: null, precisao: null },
-    prefs: Object.assign({ base: 'mapa', ocultas: [], vias: true, pontos: true }, LS.get('prefs') || {}),
+    prefs: Object.assign({ base: 'mapa', ocultas: [], ocultasSituacao: [], colorir: 'situacao', vias: true, pontos: true },
+                         LS.get('prefs') || {}),
     sincronizando: false,
     enviando: false
   };
@@ -349,6 +352,7 @@
 
     E.grupoVias = L.layerGroup();
     E.grupoPontos = L.layerGroup();
+    E.grupoProps = L.layerGroup().addTo(E.mapa);
     E.mapa.on('zoomend', ajustarRaios);
     E.mapa.on('click', function () { fecharPainel(); });
     // toque longo (ou botão direito) no mapa: cadastrar algo naquele ponto
@@ -373,7 +377,36 @@
 
   function ajustarRaios() {
     var r = raioAtual();
-    E.props.forEach(function (p) { if (p.marcador) p.marcador.setRadius(r); });
+    E.props.forEach(function (p) { if (p.marcador) p.marcador.setRadius(p.validado ? r + 1 : r); });
+  }
+
+  /** Cor do ponto: pela situação (validado / não validado) ou pelo tipo. */
+  function corPropriedade(p) {
+    if (E.prefs.colorir === 'tipo') return CORES_ESPECIE[p.especie] || COR_PADRAO;
+    return p.validado ? COR_SITUACAO.VALIDADO : COR_SITUACAO.NAO_VALIDADO;
+  }
+  function estiloMarcador(p, raio) {
+    var porSituacao = E.prefs.colorir !== 'tipo';
+    return {
+      renderer: E.render, radius: p.validado ? raio + 1 : raio,
+      color: porSituacao && p.validado ? '#0b3d1f' : '#ffffff',
+      weight: porSituacao && p.validado ? 2 : 1.5,
+      fillColor: corPropriedade(p), fillOpacity: 1
+    };
+  }
+  function recolorir() {
+    var r = raioAtual();
+    E.props.forEach(function (p) { p.marcador.setStyle(estiloMarcador(p, r)); });
+  }
+  /** Mostra só o que passa nos filtros de tipo e de situação. */
+  function aplicarVisibilidade() {
+    var ocT = E.prefs.ocultas, ocS = E.prefs.ocultasSituacao;
+    E.props.forEach(function (p) {
+      var ver = ocT.indexOf(p.especie) === -1 && ocS.indexOf(p.validado ? 'VALIDADO' : 'NAO_VALIDADO') === -1;
+      var esta = E.grupoProps.hasLayer(p.marcador);
+      if (ver && !esta) E.grupoProps.addLayer(p.marcador);
+      else if (!ver && esta) E.grupoProps.removeLayer(p.marcador);
+    });
   }
 
   /* --- dados --- */
@@ -391,8 +424,7 @@
     E.dados = d;
     if (!d.pontos) d.pontos = { cols: COLS_PONTO.slice(), rows: [] };
 
-    Object.keys(E.gruposEspecie).forEach(function (k) { E.mapa.removeLayer(E.gruposEspecie[k]); });
-    E.gruposEspecie = {};
+    E.grupoProps.clearLayers();
     E.grupoVias.clearLayers();
     E.grupoPontos.clearLayers();
 
@@ -430,23 +462,18 @@
         String(o.PLACAS_VEICULOS || '').replace(/[\s,]/g, '')
       ].join(' '));
       return p;
-    }).filter(function (p) { return p.lat !== null && p.lon !== null; });
+    }).filter(function (p) {
+      return p.lat !== null && p.lon !== null && String(p.d.STATUS).toUpperCase() !== 'EXCLUIDO';
+    });
 
     E.props.forEach(function (p) {
-      var g = E.gruposEspecie[p.especie];
-      if (!g) g = E.gruposEspecie[p.especie] = L.layerGroup();
-      p.marcador = L.circleMarker([p.lat, p.lon], {
-        renderer: E.render, radius: raio, color: '#ffffff', weight: 1.5,
-        fillColor: CORES_ESPECIE[p.especie] || COR_PADRAO, fillOpacity: 1
-      }).on('click', function (ev) {
+      p.validado = String(p.d.STATUS).toUpperCase() === 'VALIDADO';
+      p.marcador = L.circleMarker([p.lat, p.lon], estiloMarcador(p, raio)).on('click', function (ev) {
         L.DomEvent.stopPropagation(ev);
         abrirFicha(p);
       });
-      g.addLayer(p.marcador);
     });
-    Object.keys(E.gruposEspecie).forEach(function (k) {
-      if (E.prefs.ocultas.indexOf(k) === -1) E.gruposEspecie[k].addTo(E.mapa);
-    });
+    aplicarVisibilidade();
 
     // pontos de interesse
     E.pontos = linhasParaObjetos(d.pontos).filter(function (o) {
@@ -628,6 +655,11 @@
         if (it.tipo === 'VISITA' || it.registrarVisita) setar(tab, linha, visita);
         setar(tab, linha, { ATUALIZADO_EM: it.feitoEm, ATUALIZADO_POR: usuario });
         break;
+      case 'PROPRIEDADE_EXCLUIR':
+        tab = d.propriedades;
+        linha = acharLinha(tab, it.alvoId);
+        if (linha) setar(tab, linha, { STATUS: 'EXCLUIDO', ATUALIZADO_EM: it.feitoEm, ATUALIZADO_POR: usuario });
+        break;
       case 'PROPRIEDADE_NOVA':
         tab = d.propriedades;
         if (acharLinha(tab, 'CAMPO-' + uidCurto(it.uid))) return;
@@ -782,7 +814,7 @@
     var o = p.d;
     destacar([p.lat, p.lon]);
     var validado = String(o.STATUS).toUpperCase() === 'VALIDADO';
-    var cor = CORES_ESPECIE[p.especie] || COR_PADRAO;
+    var cor = CORES_ESPECIE[p.especie] || COR_PADRAO; // na ficha a bolinha mostra o tipo
     var endereco = [o.LOGRADOURO, o.NUMERO && o.NUMERO !== 'SN' ? 'nº ' + o.NUMERO : (o.NUMERO === 'SN' ? 's/nº' : '')]
       .filter(Boolean).join(', ');
     var distHtml = '';
@@ -839,6 +871,8 @@
         '<a class="btn btn-secundario" target="_blank" rel="noopener" href="https://waze.com/ul?ll=' + p.lat + ',' + p.lon + '&navigate=yes">Waze</a>' +
         '<button class="btn btn-secundario largo" data-copiar="' + esc(coord) + '">Copiar coordenadas</button>' +
       '</div>' +
+      '<div class="acoes"><button class="btn btn-perigo-leve largo" data-acao="excluir-prop" data-id="' + esc(o.ID) + '">' +
+        'Excluir endereço (não confere com a realidade)</button></div>' +
       '<p class="rodape-ficha">Origem: ' + esc(o.ORIGEM || String(o.ID).split('-')[0]) + ' · ID ' + esc(o.ID) +
       (o.ATUALIZADO_POR && !/^carga/.test(o.ATUALIZADO_POR) ? '<br>Atualizado por ' + esc(o.ATUALIZADO_POR) + ' em ' + esc(fmtDataHora(o.ATUALIZADO_EM)) : '') +
       '</p>';
@@ -1032,6 +1066,22 @@
     abrirPainel(html, 'form-visita');
   }
 
+  function abrirFormExcluir(p) {
+    var html = '<form data-form="prop-excluir" data-id="' + esc(p.d.ID) + '">' +
+      '<h2>Excluir endereço</h2><p class="ficha-tipo">' + esc(p.titulo) + '</p>' +
+      '<div class="alerta perigo">O endereço deixa de aparecer no mapa de todos os militares. ' +
+      'Ele continua guardado na planilha com o motivo, e o administrador pode restaurá-lo.</div>' +
+      '<div class="campo"><span>Motivo</span><div class="opcoes">' +
+      MOTIVOS_EXCLUSAO.map(function (m) {
+        return '<label class="opcao opcao-form"><input type="radio" name="motivo" value="' + esc(m) + '"><span>' + esc(m) + '</span></label>';
+      }).join('') + '</div></div>' +
+      F.area('obs', 'Observação', '', 'Ex.: casa demolida em 2024; endereço repetido do Sítio Santa Rita') +
+      '<p class="erro" data-erro></p>' +
+      '<div class="acoes"><button type="button" class="btn btn-secundario" data-acao="cancelar">Cancelar</button>' +
+      '<button type="submit" class="btn btn-perigo">Excluir</button></div></form>';
+    abrirPainel(html, 'form-excluir');
+  }
+
   function abrirFormVia(via) {
     var v = via.d;
     destacar(via.latlngs);
@@ -1159,6 +1209,11 @@
       }
       return concluir(item, id);
     }
+    if (tipo === 'prop-excluir') {
+      if (!v.motivo) throw new Error('Escolha o motivo da exclusão.');
+      if (v.motivo === 'Outro' && !v.obs) throw new Error('Descreva o motivo na observação.');
+      return concluir({ tipo: 'PROPRIEDADE_EXCLUIR', alvoId: id, motivo: v.motivo, obs: v.obs || '' });
+    }
     if (tipo === 'visita') {
       return concluir({ tipo: 'VISITA', alvoId: id, obs: v.obs || '' }, id);
     }
@@ -1226,6 +1281,7 @@
     switch (a.getAttribute('data-acao')) {
       case 'editar-prop': abrirFormPropriedade(propPorId(id)); break;
       case 'visita': abrirFormVisita(propPorId(id)); break;
+      case 'excluir-prop': abrirFormExcluir(propPorId(id)); break;
       case 'validar-via':
         abrirFormVia(E.vias.filter(function (x) { return x.d.ID === id; })[0]); break;
       case 'editar-ponto':
@@ -1320,7 +1376,7 @@
       var sub = [p.d.LOCALIDADE, p.especie].filter(Boolean).join(' · ');
       var dist = pos ? '<span class="dist">' + esc(fmtDist(distanciaM(pos.lat, pos.lon, p.lat, p.lon))) + '</span>' : '';
       return '<li><button class="resultado" data-prop="' + i + '">' +
-        '<span class="bolinha" style="background:' + (CORES_ESPECIE[p.especie] || COR_PADRAO) + '"></span>' +
+        '<span class="bolinha" style="background:' + corPropriedade(p) + '"></span>' +
         '<span class="txt"><span class="t1">' + esc(p.titulo) + '</span>' +
         '<span class="t2">' + esc(sub) + '</span></span>' + dist + '</button></li>';
     }).join('');
@@ -1409,6 +1465,7 @@
     var contagem = {};
     E.props.forEach(function (p) { contagem[p.especie] = (contagem[p.especie] || 0) + 1; });
     var especies = Object.keys(contagem).sort(function (a, b) { return contagem[b] - contagem[a]; });
+    var nVal = E.props.filter(function (p) { return p.validado; }).length;
 
     var html = '<h2>Camadas</h2><h3>Fundo do mapa</h3><div class="segmentado">' +
       [['mapa', 'Mapa'], ['satelite', 'Satélite'], ['nenhum', 'Sem fundo']].map(function (b) {
@@ -1421,7 +1478,18 @@
       '<label class="opcao"><input type="checkbox" data-camada="pontos" ' + (E.prefs.pontos ? 'checked' : '') +
       '><span class="marca-ponto mini" style="background:#3f51b5">P</span>Pontos de interesse<span class="qtd">' + E.pontos.length + '</span></label>' +
       '</div>' +
-      '<h3>Propriedades</h3><div class="opcoes">' +
+      '<h3>Colorir propriedades por</h3><div class="segmentado seg2">' +
+      [['situacao', 'Situação'], ['tipo', 'Tipo']].map(function (b) {
+        return '<button data-colorir="' + b[0] + '" class="' + (E.prefs.colorir === b[0] ? 'ativo' : '') + '">' + b[1] + '</button>';
+      }).join('') + '</div>' +
+      '<h3>Situação</h3><div class="opcoes">' +
+      [['VALIDADO', 'Validados (conferidos em campo)', nVal], ['NAO_VALIDADO', 'Não validados', E.props.length - nVal]].map(function (s) {
+        return '<label class="opcao"><input type="checkbox" data-situacao="' + s[0] + '" ' +
+          (E.prefs.ocultasSituacao.indexOf(s[0]) === -1 ? 'checked' : '') + '><span class="bolinha' +
+          (s[0] === 'VALIDADO' ? ' bolinha-val' : '') + '" style="background:' + COR_SITUACAO[s[0]] + '"></span>' +
+          s[1] + '<span class="qtd">' + s[2].toLocaleString('pt-BR') + '</span></label>';
+      }).join('') + '</div>' +
+      '<h3>Tipo</h3><div class="opcoes">' +
       especies.map(function (e) {
         return '<label class="opcao"><input type="checkbox" data-especie="' + esc(e) + '" ' +
           (E.prefs.ocultas.indexOf(e) === -1 ? 'checked' : '') + '><span class="bolinha" style="background:' +
@@ -1433,13 +1501,13 @@
 
   $('#painel-conteudo').addEventListener('change', function (ev) {
     var el = ev.target;
-    if (el.hasAttribute('data-especie')) {
-      var e = el.getAttribute('data-especie');
-      var g = E.gruposEspecie[e];
-      E.prefs.ocultas = E.prefs.ocultas.filter(function (x) { return x !== e; });
-      if (el.checked) { if (g) g.addTo(E.mapa); }
-      else { if (g) E.mapa.removeLayer(g); E.prefs.ocultas.push(e); }
+    if (el.hasAttribute('data-especie') || el.hasAttribute('data-situacao')) {
+      var chave = el.hasAttribute('data-especie') ? 'ocultas' : 'ocultasSituacao';
+      var e = el.getAttribute('data-especie') || el.getAttribute('data-situacao');
+      E.prefs[chave] = E.prefs[chave].filter(function (x) { return x !== e; });
+      if (!el.checked) E.prefs[chave].push(e);
       LS.set('prefs', E.prefs);
+      aplicarVisibilidade();
     } else if (el.hasAttribute('data-camada')) {
       var nome = el.getAttribute('data-camada');
       var grupo = nome === 'vias' ? E.grupoVias : E.grupoPontos;
@@ -1449,6 +1517,16 @@
     }
   });
   $('#painel-conteudo').addEventListener('click', function (ev) {
+    var c = ev.target.closest('[data-colorir]');
+    if (c) {
+      E.prefs.colorir = c.getAttribute('data-colorir');
+      LS.set('prefs', E.prefs);
+      recolorir();
+      Array.prototype.forEach.call(document.querySelectorAll('[data-colorir]'), function (x) {
+        x.classList.toggle('ativo', x === c);
+      });
+      return;
+    }
     var b = ev.target.closest('[data-base]');
     if (!b) return;
     trocarBase(b.getAttribute('data-base'));
@@ -1463,12 +1541,15 @@
   $('#btn-menu').addEventListener('click', function () {
     var u = (E.sessao && E.sessao.usuario) || {};
     var d = E.dados;
+    var nValidadas = E.props.filter(function (p) { return p.validado; }).length;
     var html = '<h2>' + esc([u.postoGrad, u.nome].filter(Boolean).join(' ') || 'Usuário') + '</h2>' +
       '<p class="vazio" style="padding:0">' + esc(u.usuario || '') + ' · perfil ' + esc(u.perfil || '') + '</p>' +
       (E.fila.length ? '<div class="alerta">' + E.fila.length + ' envio(s) aguardando internet. ' +
         'Eles sobem sozinhos quando houver sinal.</div>' : '') +
       '<h3>Dados no aparelho</h3>' +
       '<div class="info-linha"><span>Propriedades</span><span>' + (E.props.length).toLocaleString('pt-BR') + '</span></div>' +
+      '<div class="info-linha"><span>Validadas em campo</span><span>' + nValidadas.toLocaleString('pt-BR') + ' (' +
+        (E.props.length ? (100 * nValidadas / E.props.length).toFixed(1).replace('.', ',') : '0') + '%)</span></div>' +
       '<div class="info-linha"><span>Trechos de via</span><span>' + (E.vias.length).toLocaleString('pt-BR') + '</span></div>' +
       '<div class="info-linha"><span>Pontos de interesse</span><span>' + E.pontos.length + '</span></div>' +
       '<div class="info-linha"><span>Baixados em</span><span>' + fmtDataHora(d && d.baixadoEm) + '</span></div>' +
