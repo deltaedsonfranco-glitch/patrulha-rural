@@ -282,3 +282,18 @@ form[data-form] .acoes {
   .status-chip { top: calc(var(--topo) + 70px); }
 }
 .lista-munis li.fora { color: var(--texto-2); }
+
+/* Usuários (ADMIN) */
+.seg3.seg2 { grid-template-columns: 1fr 1fr; }
+.avatar { width: 34px; height: 34px; border-radius: 50%; background: var(--verde); color: #fff; display: grid; place-items: center; font-weight: 700; flex: none; }
+.selo.inativo { background: #eceff1; color: #546e7a; }
+.chips-unidade { display: flex; flex-wrap: wrap; gap: 6px; margin-top: -4px; }
+.chip-btn { border: 1.5px solid var(--linha); background: #fff; color: inherit; border-radius: 16px; padding: 6px 12px; font-size: .88rem; font-weight: 600; }
+.chip-btn small { color: var(--texto-2); font-weight: 500; margin-left: 2px; }
+.chip-btn:active { background: #eef5f0; border-color: var(--verde); }
+.area-prevista { font-size: .9rem; line-height: 1.45; }
+.erro-txt { color: var(--erro); font-weight: 600; }
+.cartao-senha { display: grid; gap: 10px; background: #f3f7f4; border: 1.5px dashed var(--verde); border-radius: 12px; padding: 14px 16px; margin: 8px 0; }
+.cartao-senha small { display: block; color: var(--texto-2); font-size: .8rem; }
+.cartao-senha b { font-size: 1.25rem; word-break: break-all; }
+.cartao-senha .senha { font-family: ui-monospace, Menlo, Consolas, monospace; letter-spacing: .08em; font-size: 1.45rem; }

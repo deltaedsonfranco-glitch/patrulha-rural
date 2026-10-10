@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  var VERSAO_APP = '2.0.0';
+  var VERSAO_APP = '2.1.0';
   var C = window.CONFIG || {};
   var MUNICIPIO_V1 = C.MUNICIPIO_V1 || '3151800';
   var ZOOM_POLIGONOS = 13;
@@ -1419,6 +1419,7 @@
 
   function salvarFormulario(form) {
     var tipo = form.getAttribute('data-form'), id = form.getAttribute('data-id');
+    if (tipo === 'usuario') return salvarUsuario(form);
     if (tipo === 'municipios') {
       var cods = Array.prototype.filter.call(form.querySelectorAll('input[name=mun]'), function (i) { return i.checked; })
         .map(function (i) { return i.value; });
@@ -1733,6 +1734,7 @@
       '<div class="info-linha"><span>Acesso válido até</span><span>' + fmtDataHora(E.sessao && E.sessao.expira) + '</span></div>' +
       '<div class="menu-acoes">' + (E.municipios.length > 1 ? '<button class="btn btn-secundario" data-menu="municipios"' + (navigator.onLine ? '' : ' disabled') +
         '>Municípios neste aparelho (' + Object.keys(E.bases).length + ' de ' + E.municipios.length + ')</button>' : '') +
+      (String(u.perfil).toUpperCase() === 'ADMIN' ? '<button class="btn btn-secundario" data-menu="usuarios"' + (navigator.onLine ? '' : ' disabled') + '>Usuários (cadastro e senhas)</button>' : '') +
       '<button class="btn btn-primario" data-menu="sync"' + (navigator.onLine ? '' : ' disabled') + '>' +
       (E.fila.length ? 'Enviar pendentes e atualizar' : 'Atualizar dados agora') + '</button>' +
       '<button class="btn btn-perigo" data-menu="sair">Sair e apagar dados do aparelho</button></div>' +
@@ -1746,9 +1748,192 @@
     if (!b) return;
     if (b.getAttribute('data-menu') === 'sync') { fecharPainel(); sincronizar(false); }
     if (b.getAttribute('data-menu') === 'municipios') abrirEscolhaMunicipios(false);
+    if (b.getAttribute('data-menu') === 'usuarios') abrirUsuarios();
     if (b.getAttribute('data-menu') === 'sair') {
       if (confirm(E.fila.length ? 'ATENÇÃO: ' + E.fila.length + ' envio(s) ainda não enviados serão PERDIDOS. Sair mesmo assim?'
                                 : 'Sair? Os dados baixados serão apagados deste aparelho.')) sair();
+    }
+  });
+
+
+  /* ================================================================ */
+  /* Usuários (somente perfil ADMIN; tudo é conferido no servidor)      */
+  /* ================================================================ */
+  var ADM = null;   // { usuarios, municipios, postos, eu, filtro }
+  function normUnidade(s) {
+    return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+      .replace(/(\d)\s*[ºª°oa]\b/g, '$1').replace(/(\d)\s*[ºª°]/g, '$1').replace(/[^a-z0-9*]/g, '');
+  }
+  var UNIDADES_TODAS_APP = ['18rpm', '*', 'todas', 'regiao'];
+  function areaPrevista(unidade, perfil) {
+    if (!ADM) return [];
+    var us = String(unidade || '').split(';').map(normUnidade).filter(Boolean);
+    var tudo = perfil === 'ADMIN' || us.some(function (x) { return UNIDADES_TODAS_APP.indexOf(x) !== -1; });
+    return ADM.municipios.filter(function (m) {
+      return tudo || us.indexOf(m.cod) !== -1 ||
+        [m.bpm, m.cia, m.pelotao].some(function (x) { return x && us.indexOf(normUnidade(x)) !== -1; });
+    });
+  }
+  function unidadesDisponiveis() {
+    var u = {};
+    (ADM ? ADM.municipios : []).forEach(function (m) { [m.bpm, m.cia, m.pelotao].forEach(function (x) { if (x) u[x] = (u[x] || 0) + 1; }); });
+    return Object.keys(u).sort().map(function (k) { return { nome: k, n: u[k] }; });
+  }
+  function abrirUsuarios() {
+    if (!navigator.onLine) { toast('O cadastro de usuários precisa de internet.'); return; }
+    toast('Carregando usuários…', { duracao: 0 });
+    return api('usuarios', { token: E.sessao.token }).then(function (r) {
+      ADM = { usuarios: r.usuarios, municipios: r.municipios, postos: r.postos, eu: r.eu, filtro: ADM ? ADM.filtro : '' };
+      $('#toast').hidden = true;
+      listarUsuarios();
+    }).catch(function (e) {
+      if (e.sessaoInvalida) return sessaoExpirou(e.message);
+      toast(e.message, { duracao: 6000 });
+    });
+  }
+  function itemUsuario(u) {
+    var selos = (u.perfil === 'ADMIN' ? '<span class="selo ok">ADMIN</span>' : '') +
+      (!u.ativo ? '<span class="selo inativo">inativo</span>' : u.trocarSenha ? '<span class="selo pend">senha provisória</span>' : '');
+    return '<li><button class="resultado" data-usu-abrir="' + esc(u.usuario) + '"><span class="avatar">' + esc((u.nome || u.usuario).charAt(0).toUpperCase()) + '</span>' +
+      '<span class="txt"><span class="t1">' + esc([u.postoGrad, u.nome].filter(Boolean).join(' ') || u.usuario) + selos + '</span>' +
+      '<span class="t2">' + esc(u.usuario) + ' · ' + esc(u.unidade || (u.perfil === 'ADMIN' ? 'toda a área' : 'sem unidade')) + ' · ' +
+      u.nMunicipios + ' mun. · ' + (u.ultimoAcesso ? 'último acesso ' + esc(fmtDataHora(u.ultimoAcesso)) : 'nunca acessou') + '</span></span></button></li>';
+  }
+  function listarUsuarios() {
+    var f = normalizar(ADM.filtro);
+    var lista = ADM.usuarios.filter(function (u) {
+      return !f || normalizar([u.usuario, u.nome, u.postoGrad, u.numeroPm, u.unidade].join(' ')).indexOf(f) !== -1;
+    }).sort(function (a, b) { return (b.ativo - a.ativo) || String(a.nome).localeCompare(String(b.nome), 'pt-BR'); });
+    var html = '<h2>Usuários</h2><p class="vazio" style="padding:0 0 8px">' + ADM.usuarios.length + ' cadastrado(s) · ' +
+      ADM.usuarios.filter(function (u) { return u.ativo; }).length + ' ativo(s)</p>' +
+      '<div class="menu-acoes" style="margin-top:0"><button class="btn btn-primario" data-usu-novo>+ Cadastrar usuário</button></div>' +
+      '<label class="campo"><input type="search" data-usu-filtro placeholder="Filtrar por nome, nº PM ou unidade" value="' + esc(ADM.filtro) + '"></label>' +
+      '<ul class="resultados" data-usu-lista>' + (lista.map(itemUsuario).join('') || '<li class="vazio">Nenhum usuário encontrado.</li>') + '</ul>';
+    abrirPainel(html, 'usuarios');
+  }
+  function textoArea(unidade, perfil) {
+    var a = areaPrevista(unidade, perfil);
+    if (perfil === 'ADMIN') return '<b>Administrador:</b> vê todos os ' + a.length + ' municípios e pode cadastrar usuários.';
+    if (!a.length) return '<span class="erro-txt">Nenhum município corresponde a essa unidade. Toque numa das opções acima.</span>';
+    return '<b>Verá ' + a.length + ' município' + (a.length === 1 ? '' : 's') + ':</b> ' + esc(a.map(function (m) { return m.nome; }).join(', '));
+  }
+  function abrirFormUsuario(u) {
+    var novo = !u;
+    u = u || { usuario: '', nome: '', postoGrad: '', numeroPm: '', perfil: 'USUARIO', unidade: '', ativo: true };
+    var eu = !novo && u.usuario === ADM.eu;
+    var unidades = unidadesDisponiveis();
+    var html = '<h2>' + (novo ? 'Cadastrar usuário' : esc([u.postoGrad, u.nome].filter(Boolean).join(' ') || u.usuario)) + '</h2>' +
+      '<form data-form="usuario" data-novo="' + (novo ? '1' : '') + '" autocomplete="off">' +
+      (novo ? F.texto('usuario', 'Usuário para login (nº PM, sem espaços)', '', 'required minlength="3" maxlength="40" autocapitalize="none" spellcheck="false" inputmode="text" pattern="[A-Za-z0-9._\\-]+"')
+            : '<div class="info-linha"><span>Usuário (login)</span><span><b>' + esc(u.usuario) + '</b></span></div>' +
+              '<input type="hidden" name="usuario" value="' + esc(u.usuario) + '">') +
+      F.texto('nome', 'Nome de guerra / nome', u.nome, 'required maxlength="120"') +
+      F.escolha('postoGrad', 'Posto / graduação', ADM.postos, u.postoGrad) +
+      F.texto('numeroPm', 'Nº PM', u.numeroPm, 'maxlength="20" inputmode="numeric"') +
+      '<div class="campo"><span>Perfil</span><div class="seg3 seg2">' + [['USUARIO', 'Usuário'], ['ADMIN', 'Administrador']].map(function (o) {
+        return '<label><input type="radio" name="perfil" value="' + o[0] + '"' + (u.perfil === o[0] ? ' checked' : '') + (eu ? ' disabled' : '') + '><span>' + o[1] + '</span></label>';
+      }).join('') + '</div>' + (eu ? '<input type="hidden" name="perfil" value="ADMIN">' : '') + '</div>' +
+      '<label class="campo">Unidade (área de atuação)<input name="unidade" data-usu-unidade value="' + esc(u.unidade) + '" maxlength="200" placeholder="Ex.: 163 Cia PM"></label>' +
+      '<div class="chips chips-unidade">' + unidades.map(function (x) {
+        return '<button type="button" class="chip-btn" data-usu-un="' + esc(x.nome) + '">' + esc(x.nome) + ' <small>' + x.n + '</small></button>';
+      }).join('') + '<button type="button" class="chip-btn" data-usu-un="18ª RPM">18ª RPM <small>toda</small></button></div>' +
+      '<p class="dica" style="margin-top:4px">Toque numa unidade para usá-la. Para mais de uma, separe com ";" (ex.: 163 Cia PM; 242 Cia PM).</p>' +
+      '<div class="alerta area-prevista" data-usu-area>' + textoArea(u.unidade, u.perfil) + '</div>' +
+      (novo ? '' : F.caixa('ativo', 'Acesso ativo' + (eu ? ' (você não pode se desativar)' : ''), u.ativo).replace('<input', eu ? '<input disabled' : '<input')) +
+      (novo ? '<p class="dica">Ao salvar, o sistema gera uma <b>senha provisória</b>. O militar troca por uma senha própria no primeiro acesso.</p>' : '') +
+      '<p class="erro" data-erro></p><div class="acoes"><button type="button" class="btn btn-secundario" data-usu-voltar>Voltar</button>' +
+      '<button type="submit" class="btn btn-primario">' + (novo ? 'Cadastrar' : 'Salvar') + '</button></div>' +
+      (novo ? '' : '<div class="menu-acoes"><button type="button" class="btn btn-secundario" data-usu-senha="' + esc(u.usuario) + '">Gerar nova senha provisória</button></div>' +
+        '<p class="dica">Use quando o militar esquecer a senha ou ficar bloqueado. As sessões abertas dele são encerradas.</p>') +
+      '</form>';
+    abrirPainel(html, 'form-usuario');
+  }
+  function salvarUsuario(form) {
+    var erro = form.querySelector('[data-erro]'), btn = form.querySelector('button[type=submit]');
+    var v = F.ler(form), novo = form.getAttribute('data-novo') === '1';
+    var dados = { novo: novo, usuario: String(v.usuario || '').toLowerCase(), nome: v.nome, postoGrad: v.postoGrad, numeroPm: v.numeroPm,
+                  perfil: v.perfil || 'USUARIO', unidade: v.unidade, ativo: novo ? true : v.ativo !== false };
+    var ativoEl = form.querySelector('[name=ativo]');
+    if (ativoEl && ativoEl.disabled) dados.ativo = true;
+    if (!/^[a-z0-9._-]{3,40}$/.test(dados.usuario)) throw new Error('Usuário inválido: de 3 a 40 letras ou números, sem espaços.');
+    if (!dados.nome) throw new Error('Informe o nome.');
+    if (dados.perfil !== 'ADMIN' && !areaPrevista(dados.unidade, dados.perfil).length) throw new Error('Escolha uma unidade válida (toque numa das opções).');
+    btn.disabled = true; btn.textContent = 'Salvando…';
+    return api('usuarioSalvar', { token: E.sessao.token, dados: dados }).then(function (r) {
+      if (r.senha) return mostrarSenha(r.usuario, r.senha, true, r.municipios);
+      toast('Usuário ' + r.usuario + ' atualizado.');
+      return abrirUsuarios();
+    }).catch(function (e) {
+      if (e.sessaoInvalida) return sessaoExpirou(e.message);
+      btn.disabled = false; btn.textContent = novo ? 'Cadastrar' : 'Salvar';
+      erro.textContent = e.message; erro.scrollIntoView({ block: 'center' });
+    });
+  }
+  function mostrarSenha(usuario, senha, novo, municipios) {
+    var endereco = location.origin + location.pathname;
+    var msg = 'Patrulha Rural - acesso\nEndereço: ' + endereco + '\nUsuário: ' + usuario + '\nSenha provisória: ' + senha +
+      '\nNo primeiro acesso o app pede para criar uma senha própria.';
+    var html = '<h2>' + (novo ? 'Usuário cadastrado' : 'Nova senha gerada') + '</h2>' +
+      '<div class="cartao-senha"><div><small>Usuário</small><b>' + esc(usuario) + '</b></div><div><small>Senha provisória</small><b class="senha">' + esc(senha) + '</b></div></div>' +
+      '<div class="alerta perigo">Anote ou envie agora: <b>esta senha não aparece de novo</b>. Entregue só ao próprio militar.</div>' +
+      (municipios && municipios.length ? '<p class="dica">Área: ' + esc(municipios.join(', ')) + '</p>' : '') +
+      '<div class="menu-acoes"><button class="btn btn-primario" data-usu-copiar>Copiar mensagem de acesso</button>' +
+      (navigator.share ? '<button class="btn btn-secundario" data-usu-compartilhar>Enviar (WhatsApp, etc.)</button>' : '') +
+      '<button class="btn btn-secundario" data-usu-lista-voltar>Voltar à lista de usuários</button></div>';
+    abrirPainel(html, 'usuario-senha');
+    ADM._msg = msg;
+  }
+  $('#painel-conteudo').addEventListener('input', function (ev) {
+    var t = ev.target;
+    if (t.hasAttribute('data-usu-filtro')) {
+      ADM.filtro = t.value;
+      var f = normalizar(t.value);
+      var lista = ADM.usuarios.filter(function (u) { return !f || normalizar([u.usuario, u.nome, u.postoGrad, u.numeroPm, u.unidade].join(' ')).indexOf(f) !== -1; });
+      $('[data-usu-lista]').innerHTML = lista.map(itemUsuario).join('') || '<li class="vazio">Nenhum usuário encontrado.</li>';
+    } else if (t.hasAttribute('data-usu-unidade')) {
+      atualizarAreaForm(t.form);
+    }
+  });
+  $('#painel-conteudo').addEventListener('change', function (ev) {
+    if (ev.target.name === 'perfil' && ev.target.form && ev.target.form.getAttribute('data-form') === 'usuario') atualizarAreaForm(ev.target.form);
+  });
+  function atualizarAreaForm(form) {
+    var perfil = (form.querySelector('[name=perfil]:checked') || form.querySelector('[name=perfil]') || {}).value || 'USUARIO';
+    form.querySelector('[data-usu-area]').innerHTML = textoArea(form.querySelector('[name=unidade]').value, perfil);
+  }
+  $('#painel-conteudo').addEventListener('click', function (ev) {
+    var t = ev.target, b;
+    if ((b = t.closest('[data-usu-abrir]'))) {
+      var u = ADM.usuarios.filter(function (x) { return x.usuario === b.getAttribute('data-usu-abrir'); })[0];
+      if (u) abrirFormUsuario(u);
+    } else if (t.closest('[data-usu-novo]')) {
+      abrirFormUsuario(null);
+    } else if ((b = t.closest('[data-usu-un]'))) {
+      var campoUn = b.closest('form').querySelector('[name=unidade]');
+      var atual = listaDe(campoUn.value), nova = b.getAttribute('data-usu-un');
+      var jaTem = atual.some(function (x) { return normUnidade(x) === normUnidade(nova); });
+      campoUn.value = jaTem ? atual.filter(function (x) { return normUnidade(x) !== normUnidade(nova); }).join('; ')
+                            : (normUnidade(nova) === '18rpm' || !atual.length ? nova : atual.concat(nova).join('; '));
+      atualizarAreaForm(b.closest('form'));
+    } else if (t.closest('[data-usu-voltar]') || t.closest('[data-usu-lista-voltar]')) {
+      if (t.closest('[data-usu-lista-voltar]')) abrirUsuarios(); else listarUsuarios();
+    } else if ((b = t.closest('[data-usu-senha]'))) {
+      var alvo = b.getAttribute('data-usu-senha');
+      if (!confirm('Gerar nova senha provisória para ' + alvo + '? A senha atual deixa de valer.')) return;
+      b.disabled = true;
+      api('usuarioSenha', { token: E.sessao.token, usuario: alvo }).then(function (r) {
+        mostrarSenha(r.usuario, r.senha, false);
+      }).catch(function (e) {
+        if (e.sessaoInvalida) return sessaoExpirou(e.message);
+        b.disabled = false; toast(e.message, { duracao: 6000 });
+      });
+    } else if (t.closest('[data-usu-copiar]')) {
+      var texto = ADM._msg;
+      var ok = function () { toast('Mensagem copiada. Cole no WhatsApp ou onde preferir.'); };
+      if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(texto).then(ok, function () { toast(texto, { duracao: 15000 }); });
+      else toast(texto, { duracao: 15000 });
+    } else if (t.closest('[data-usu-compartilhar]')) {
+      navigator.share({ title: 'Patrulha Rural', text: ADM._msg }).catch(function () { /* cancelado */ });
     }
   });
 

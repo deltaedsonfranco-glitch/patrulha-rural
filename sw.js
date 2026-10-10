@@ -1,6 +1,6 @@
 /* Service worker: guarda o app no aparelho para abrir sem internet.
  * Ao publicar uma nova versão do app, aumente o número em VERSAO. */
-var VERSAO = 'pr-v2.0.0';
+var VERSAO = 'pr-v2.1.1';
 var ARQUIVOS = [
   './',
   'index.html',
