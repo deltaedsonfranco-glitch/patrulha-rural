@@ -192,6 +192,21 @@ input { font: inherit; }
 /* Marcador da posição do militar */
 .minha-pos { width: 18px; height: 18px; border-radius: 50%; background: #1e88e5; border: 3px solid #fff; box-shadow: 0 0 0 2px rgba(30,136,229,.35), 0 1px 4px rgba(0,0,0,.4); }
 
+/* ---------------- v2: propriedades rurais ---------------- */
+.marca-prop { width: 16px; height: 16px; border: 2px solid #fff; border-radius: 3px; transform: rotate(45deg);
+  box-shadow: 0 1px 4px rgba(0,0,0,.45); }
+.marca-prop.mini { display: inline-block; width: 12px; height: 12px; flex: none; margin: 0 2px; vertical-align: middle; }
+.dica-chip { position: absolute; z-index: 1000; left: 12px; top: calc(var(--topo) + 104px); background: rgba(255,255,255,.92);
+  color: var(--texto-2); font-size: .78rem; padding: 5px 10px; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.2);
+  max-width: calc(100% - 90px); }
+.link-prop { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; margin-top: 10px; padding: 10px 12px;
+  border: 1.5px solid var(--linha); border-radius: 12px; background: #f6faf7; color: var(--texto); font-size: .95rem; }
+.link-prop:active { background: #e8f2eb; }
+.rebanho { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
+.rebanho label { display: grid; gap: 4px; font-weight: 500; font-size: .85rem; }
+.lista-munis { margin: 0; padding-left: 20px; columns: 2; font-size: .92rem; line-height: 1.6; }
+.linha-amostra.limite { border-top: 2px dashed #1f3d2b; }
+
 /* ---------------- v1.2: situação e exclusão ---------------- */
 .segmentado.seg2 { grid-template-columns: 1fr 1fr; }
 .bolinha.bolinha-val { box-shadow: 0 0 0 2px #0b3d1f; border-color: #0b3d1f; }
@@ -266,3 +281,4 @@ form[data-form] .acoes {
   .barra-topo { max-width: 480px; }
   .status-chip { top: calc(var(--topo) + 70px); }
 }
+.lista-munis li.fora { color: var(--texto-2); }
