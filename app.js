@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  var VERSAO_APP = '2.1.0';
+  var VERSAO_APP = '2.4.0';
   var C = window.CONFIG || {};
   var MUNICIPIO_V1 = C.MUNICIPIO_V1 || '3151800';
   var ZOOM_POLIGONOS = 13;
@@ -188,7 +188,7 @@
   /* ================================================================ */
   var CAMPO_VAZIO = function () {
     return { enderecos: { cols: ['ID'], rows: [] }, propriedades: { cols: ['ID'], rows: [] },
-             vias: { cols: ['ID'], rows: [] }, pontos: { cols: ['ID'], rows: [] } };
+             vias: { cols: ['ID'], rows: [] }, pontos: { cols: ['ID'], rows: [] }, redes: { cols: ['ID'], rows: [] } };
   };
   var E = {
     sessao: null,
@@ -201,8 +201,9 @@
     destaque: null, marcaLocal: null, enquadrado: false,
     gps: { watch: null, seguir: false, pos: null, marcador: null, precisao: null },
     prefs: Object.assign({ base: 'mapa', ocultas: [], ocultasSituacao: [], colorir: 'situacao', vias: true,
-                           pontos: true, props: true, ends: true, limites: true }, LS.get('prefs') || {}),
-    sincronizando: false, enviando: false
+                           pontos: true, props: true, ends: true, limites: true, redes: true }, LS.get('prefs') || {}),
+    sincronizando: false, enviando: false,
+    redes: [], redePorEnd: {}
   };
 
   /* ================================================================ */
@@ -399,10 +400,11 @@
     lista.forEach(function (m) { area[m.cod] = true; });
     var sel = (E.prefs.munSel || []).filter(function (c) { return area[c]; });
     if (!sel.length) {
+      // área pequena: baixa tudo (inclusive municípios novos); área grande: mantém o que já tem ou pede a escolha
       var ja = Object.keys(E.bases).filter(function (c) { return area[c]; });
-      if (ja.length) sel = ja;
-      else if (lista.length > MUNICIPIOS_AUTO) return null;
-      else sel = Object.keys(area);
+      if (lista.length <= MUNICIPIOS_AUTO) sel = Object.keys(area);
+      else if (ja.length) sel = ja;
+      else return null;
     }
     var mapa = {};
     sel.forEach(function (c) { mapa[c] = true; });
@@ -454,8 +456,8 @@
               excluido: String(d.STATUS).toUpperCase() === 'EXCLUIDO',
               idProp: (ov && ov.ID_PROPRIEDADE) || (base && base.ID_PROP) || '' };
     e.titulo = d.NOME_ESTABELECIMENTO || (d.LOGRADOURO ? d.LOGRADOURO + (d.NUMERO && d.NUMERO !== 'SN' ? ', ' + d.NUMERO : '') : '') ||
-               d.LOCALIDADE || e.especie;
-    e.busca = normalizar([d.MORADOR, d.NOME_ESTABELECIMENTO, d.LOGRADOURO, d.NUMERO, d.LOCALIDADE, d.CEP, e.especie,
+               d.NOME_LOCAL || d.LOCALIDADE || e.especie;
+    e.busca = normalizar([d.MORADOR, d.NOME_ESTABELECIMENTO, d.NOME_LOCAL, d.LOGRADOURO, d.NUMERO, d.LOCALIDADE, d.CEP, e.especie,
                           d.PLACAS_VEICULOS, String(d.PLACAS_VEICULOS || '').replace(/[\s,]/g, ''), nomeMunicipio(e.mun)].join(' '));
     return e;
   }
@@ -484,7 +486,7 @@
     var ovEnd = porId(objetos(E.campo.enderecos)), ovProp = porId(objetos(E.campo.propriedades));
     var ovVia = porId(objetos(E.campo.vias));
     var usadosEnd = {}, usadosProp = {};
-    E.ends = []; E.props = []; E.vias = []; E.endPorId = {}; E.propPorId = {}; E.viaPorId = {};
+    E.ends = []; E.props = []; E.vias = []; E.endPorId = {}; E.propPorId = {}; E.viaPorId = {}; E.redes = []; E.redePorEnd = {};
 
     Object.keys(E.bases).forEach(function (cod) {
       var b = E.bases[cod];
@@ -522,6 +524,7 @@
     }).map(function (o) { return { tipo: 'PONTO', id: o.ID, mun: o.COD_MUNICIPIO, lat: numero(o.LATITUDE), lon: numero(o.LONGITUDE), d: o }; })
       .filter(function (p) { return p.lat !== null && p.lon !== null; });
 
+    montarRedes();
     desenharTudo();
     atualizarStatus();
   }
@@ -541,8 +544,8 @@
     };
     trocarBase(E.prefs.base);
     E.mapa.attributionControl.setPrefix(false);
-    ['limites', 'props', 'vias', 'ends', 'pontos'].forEach(function (k) { E.g[k] = L.layerGroup(); });
-    E.mapa.on('zoomend', function () { ajustarRaios(); });
+    ['limites', 'redes', 'props', 'vias', 'ends', 'pontos', 'sugest'].forEach(function (k) { E.g[k] = L.layerGroup(); });
+    E.mapa.on('zoomend', function () { ajustarRaios(); E.mapa.getContainer().classList.toggle('mapa-longe', E.mapa.getZoom() < 13); });
     E.mapa.on('moveend', function () { atualizarVisiveis(); atualizarPoligonos(); atualizarDica(); });
     E.mapa.on('click', function () { fecharPainel(); });
     E.mapa.on('contextmenu', function (ev) { abrirAdicionar(ev.latlng); });
@@ -689,15 +692,18 @@
     if (E.modoLeve) E.ends.forEach(function (e) { gradeAdd(E.grade.ends, e, [e.lon, e.lat, e.lon, e.lat]); });
     aplicarVisibilidade();
     desenharPontos();
-    ['limites', 'props', 'vias', 'ends', 'pontos'].forEach(function (k) {
+    desenharRedes();
+    ['limites', 'redes', 'props', 'vias', 'ends', 'pontos'].forEach(function (k) {
       if (camadaLigada(k)) E.g[k].addTo(E.mapa); else E.mapa.removeLayer(E.g[k]);
     });
+    E.g.sugest.addTo(E.mapa);
     if (!E.enquadrado && Object.keys(E.bases).length) {
       var b = L.latLngBounds([]);
       E.g.limites.eachLayer(function (l) { b.extend(l.getBounds()); });
       if (b.isValid()) E.mapa.fitBounds(b, { padding: [20, 20] });
       E.enquadrado = true;
     }
+    if (SUG.lista.length) desenharSugestoes();
     atualizarPoligonos();
     atualizarDica();
   }
@@ -829,12 +835,21 @@
   /* ================================================================ */
   /* Fila de envios (funciona sem sinal)                               */
   /* ================================================================ */
-  function registrar(item) {
+  function registrar(item, extra) {
     item.uid = item.uid || novoUid();
     item.feitoEm = new Date().toISOString();
     if (E.gps.pos) item.posicao = { lat: E.gps.pos.lat, lon: E.gps.pos.lon, precisao: E.gps.pos.precisao };
     E.fila.push(item);
     var alvo = aplicarItemLocal(item);
+    if (extra) {   // envio complementar ligado ao mesmo registro (ex.: contato sobre a Rede de Proteção)
+      extra.uid = novoUid(); extra.feitoEm = item.feitoEm; extra.posicao = item.posicao;
+      if (!extra.alvoId && alvo) extra.alvoId = alvo.id;
+      E.fila.push(extra);
+      aplicarItemLocal(extra);
+    }
+    if (item.tipo === 'REDE_CONTATO' || (extra && extra.tipo === 'REDE_CONTATO')) {
+      E.redePorEnd = {}; montarRedes(); E.g.redes.clearLayers(); desenharRedes();
+    }
     if (alvo) refazer(alvo.tipo, alvo.id);
     return Promise.all([IDB.set('fila', E.fila), IDB.set('campo', E.campo)]).then(function () {
       atualizarStatus();
@@ -939,6 +954,23 @@
         setar(t, r, Object.assign({ LATITUDE: it.novaPosicao.lat.toFixed(6), LONGITUDE: it.novaPosicao.lon.toFixed(6), STATUS: 'ATIVO' },
                                   it.dados, autoria));
         return { tipo: 'PONTO', id: id };
+      case 'REDE_CONTATO':
+        t = tabela(it.alvoTipo === 'END' ? 'enderecos' : 'propriedades');
+        r = linha(t, it.alvoId, munDe(it.alvoId), origemDe(it.alvoId));
+        setar(t, r, Object.assign({ REDE_ID: it.redeId, REDE_ADESAO: it.adesao, REDE_NO_GRUPO: it.noGrupo || '' },
+          it.ciencia && it.adesao !== 'NAO_FOI_POSSIVEL' ? { REDE_CIENCIA_EM: it.feitoEm, REDE_CIENCIA_POR: u } : {}, autoria));
+        var tr = tabela('redes'), lr = null, iIdR = col(tr, 'ID');
+        tr.rows.forEach(function (x) { if (x[iIdR] === it.redeId) lr = x; });
+        if (lr) {
+          var mem = String(lr[col(tr, 'ENDERECOS')] || '').split(';').filter(Boolean);
+          if (it.alvoTipo === 'END' && it.adesao === 'ADERIU' && mem.indexOf(it.alvoId) === -1 && !E.redePorEnd[it.alvoId]) {
+            mem.push(it.alvoId); setar(tr, lr, { ENDERECOS: mem.join(';'), N_ENDERECOS: String(mem.length) });
+          }
+          if (it.grupo && it.grupo.tem) setar(tr, lr, { GRUPO_WHATSAPP: it.grupo.tem, GRUPO_ADMIN: it.grupo.tem === 'SIM' ? it.grupo.admin || '' : '',
+            GRUPO_CONTATO: it.grupo.tem === 'SIM' ? it.grupo.contato || '' : '', PM_NO_GRUPO: it.grupo.tem === 'SIM' ? it.grupo.pm || '' : '',
+            GRUPO_ATUALIZADO_EM: it.feitoEm, GRUPO_ATUALIZADO_POR: u });
+        }
+        return { tipo: it.alvoTipo, id: it.alvoId };
       case 'PONTO_EDITAR':
         t = tabela('pontos');
         r = linha(t, it.alvoId);
@@ -1094,10 +1126,12 @@
         '<button class="btn btn-primario" data-acao="editar-end" data-id="' + esc(e.id) + '">Atualizar informações</button>' +
         '<button class="btn btn-secundario" data-acao="visita-end" data-id="' + esc(e.id) + '">Registrar visita</button></div>' +
       blocoVisita(d) +
+      linkRede(redeDe(e), e) +
       grupo('Morador', campo('Nome', esc(d.MORADOR)) + campo('Telefone', tel(d.CONTATO)) +
         campo('Moradores', esc(d.N_MORADORES)) + campo('Placas', esc(d.PLACAS_VEICULOS)) +
         campo('Cão', esc(simNao(d.TEM_CAO))) + campo('Câmeras', esc(simNao(d.TEM_CAMERAS)))) +
       grupo('Localização', campo('Município', esc(nomeMunicipio(e.mun))) + campo('Localidade', esc(d.LOCALIDADE)) +
+        campo('Nome local', d.NOME_LOCAL ? esc(d.NOME_LOCAL) + ' <small class="nao-oficial">não oficial</small>' : '') +
         campo('Endereço', esc(endereco)) + campo('Complemento', esc(d.COMPLEMENTO)) + campo('CEP', esc(d.CEP)) +
         campo('Coordenadas', esc(e.lat.toFixed(6) + ', ' + e.lon.toFixed(6)) + (/^GPS_CAMPO/.test(d.PRECISAO_COORD) ? '<br><small>conferida em campo</small>' : '')) +
         campo('Distância', distancia(e)) + campo('Como chegar', esc(d.COMO_CHEGAR))) +
@@ -1125,7 +1159,7 @@
       '<div class="acoes acoes-topo">' +
         '<button class="btn btn-primario" data-acao="editar-prop" data-id="' + esc(p.id) + '">Atualizar informações</button>' +
         '<button class="btn btn-secundario" data-acao="visita-prop" data-id="' + esc(p.id) + '">Registrar visita</button></div>' +
-      blocoVisita(d) +
+      linkRede(redeDe(p), p) + blocoVisita(d) +
       grupo('Responsáveis', campo('Proprietário', esc(d.PROPRIETARIO)) + campo('Telefone', tel(d.CONTATO)) +
         campo('Caseiro / adm.', esc(d.CASEIRO)) + campo('Tel. caseiro', tel(d.CONTATO_CASEIRO))) +
       grupo('Atividade', campo('Atividades', esc(listaDe(d.ATIVIDADES).join(', '))) + campo('Culturas', esc(listaDe(d.CULTURAS).join(', '))) +
@@ -1298,20 +1332,20 @@
   function abrirFormEnd(e) {
     abrirPainel('<form data-form="end-editar" data-id="' + esc(e.id) + '" novalidate><h2>Atualizar endereço</h2>' +
       '<p class="ficha-tipo">' + esc(e.titulo) + '</p><p class="dica">Informe ao morador que os dados são para uso da Patrulha Rural.</p>' +
-      camposEndereco(e.d) + '<h3>Visita e posição</h3>' + F.caixa('registrarVisita', 'Registrar visita agora', true) +
+      camposEndereco(e.d) + blocoRede(e) + '<h3>Visita e posição</h3>' + F.caixa('registrarVisita', 'Registrar visita agora', true) +
       opcaoGps(e, 'Mover o ponto para minha posição') + rodapeForm() + '</form>', 'form-end');
   }
   function abrirFormProp(p) {
     abrirPainel('<form data-form="prop-editar" data-id="' + esc(p.id) + '" novalidate><h2>Atualizar propriedade rural</h2>' +
       '<p class="ficha-tipo">' + esc(p.titulo) + '</p><p class="dica">Informe ao responsável que os dados são para uso da Patrulha Rural.</p>' +
-      camposPropriedade(p.d) + '<h3>Visita e sede</h3>' + F.caixa('registrarVisita', 'Registrar visita agora', true) +
+      camposPropriedade(p.d) + blocoRede(p) + '<h3>Visita e sede</h3>' + F.caixa('registrarVisita', 'Registrar visita agora', true) +
       opcaoGps(p, 'Marcar a sede na minha posição') + rodapeForm() + '</form>', 'form-prop');
   }
   function abrirFormVisita(x) {
     abrirPainel('<form data-form="visita" data-id="' + esc(x.id) + '" data-tipo="' + x.tipo + '"><h2>Registrar visita</h2>' +
       '<p class="ficha-tipo">' + esc(x.titulo) + '</p>' +
       F.area('obs', 'Observação (opcional)', '', 'Ex.: tudo em ordem; morador relatou movimentação estranha à noite') +
-      rodapeForm().replace('>Salvar<', '>Registrar<') + '</form>', 'form-visita');
+      blocoRede(x) + rodapeForm().replace('>Salvar<', '>Registrar<') + '</form>', 'form-visita');
   }
   function abrirFormExcluir(x) {
     var nome = x.tipo === 'END' ? 'endereço' : 'propriedade';
@@ -1344,14 +1378,53 @@
       F.escolha('OPERADORA', 'Operadora', OPCOES.OPERADORA, o.OPERADORA) + rodapeForm() + '</form>', 'form-ponto');
     if (!pt) marcarLocal([local.lat, local.lon]);
   }
+  /** Nomes oficiais (IBGE) perto do ponto: endereço mais próximo, localidades e logradouros por distância. */
+  function referenciasIbge(lat, lon, mun) {
+    var kx = Math.cos(lat * Math.PI / 180) * 111320, ky = 110540;
+    var locs = {}, logs = {}, perto = null;
+    E.ends.forEach(function (e) {
+      if (!e.base || e.mun !== mun || e.excluido) return;
+      var dx = (e.lon - lon) * kx, dy = (e.lat - lat) * ky, d = Math.sqrt(dx * dx + dy * dy);
+      if (!perto || d < perto.d) perto = { e: e, d: d };
+      var l = String(e.base.LOCALIDADE || '').trim(), g = String(e.base.LOGRADOURO || '').trim();
+      if (l && (!(l in locs) || d < locs[l])) locs[l] = d;
+      if (g && d <= 5000 && (!(g in logs) || d < logs[g])) logs[g] = d;
+    });
+    function ordenar(m, max) {
+      return Object.keys(m).sort(function (a, b) { return m[a] - m[b]; }).slice(0, max).map(function (k) { return { nome: k, d: m[k] }; });
+    }
+    return { perto: perto, localidades: ordenar(locs, 40), logradouros: ordenar(logs, 40) };
+  }
+  function escolhaOficial(nome, rotulo, lista, valor, vazio) {
+    return '<label class="campo">' + esc(rotulo) + ' <small class="oficial">nome oficial IBGE</small><select name="' + nome + '">' +
+      (vazio ? '<option value="">' + esc(vazio) + '</option>' : '') +
+      lista.map(function (x) {
+        return '<option value="' + esc(x.nome) + '"' + (x.nome === valor ? ' selected' : '') + '>' + esc(x.nome) + ' · ' + fmtDist(x.d) + '</option>';
+      }).join('') + '</select></label>';
+  }
   function abrirFormNovoEnd(local) {
     var prop = propriedadeEm(local.lat, local.lon);
+    var ref = referenciasIbge(local.lat, local.lon, local.mun);
+    var p = ref.perto && ref.perto.d <= 3000 ? ref.perto : null;
+    var locPadrao = p ? String(p.e.base.LOCALIDADE || '') : (ref.localidades[0] ? ref.localidades[0].nome : '');
+    var logPadrao = p && p.d <= 1500 ? String(p.e.base.LOGRADOURO || '') : '';
+    var blocoLocal = ref.localidades.length
+      ? (p ? '<div class="ref-ibge"><small>Endereço do IBGE mais próximo · ' + fmtDist(p.d) + '</small><b>' + esc(p.e.titulo) + '</b>' +
+             (p.e.base.LOCALIDADE ? '<span>' + esc(p.e.base.LOCALIDADE) + '</span>' : '') + '</div>' +
+             '<input type="hidden" name="REF_IBGE" value="' + esc(p.e.id) + '">'
+           : '<p class="dica">Nenhum endereço do IBGE a menos de 3 km. Escolha a localidade mais próxima.</p>') +
+        escolhaOficial('LOCALIDADE', 'Localidade', ref.localidades, locPadrao) +
+        escolhaOficial('LOGRADOURO', 'Estrada / logradouro', ref.logradouros, logPadrao, 'Sem nome no IBGE / não se aplica')
+      : '<p class="dica">Este município ainda não tem endereços do IBGE no aparelho. Use o nome local abaixo.</p>';
     abrirPainel('<form data-form="end-novo"' + atributosLocal(local) + (prop ? ' data-prop="' + esc(prop.id) + '"' : '') + ' novalidate>' +
       '<h2>Novo endereço</h2><p class="dica">' + descricaoLocal(local) + (prop ? '<br>Dentro de: <strong>' + esc(prop.titulo) + '</strong>' : '') + '</p>' +
       F.escolha('ESPECIE', 'Tipo', OPCOES.ESPECIE_NOVA, 'Domicílio particular', true) +
-      F.texto('LOCALIDADE', 'Localidade / bairro rural', '', 'maxlength="120"') +
-      F.texto('LOGRADOURO', 'Estrada / logradouro', '', 'maxlength="120"') + F.texto('NUMERO', 'Número / km', '', 'maxlength="20"') +
-      camposEndereco({}) + F.caixa('registrarVisita', 'Registrar visita agora', true) + rodapeForm() + '</form>', 'form-end-novo');
+      blocoLocal +
+      F.texto('NUMERO', 'Número / km', '', 'maxlength="20"') +
+      '<label class="campo">Nome local <small class="nao-oficial">não oficial · opcional</small><input name="NOME_LOCAL" maxlength="120" placeholder="Como a comunidade chama (ex.: Sítio Boa Vista)"></label>' +
+      '<p class="dica" style="margin-top:-6px">O nome local fica guardado ao lado do oficial, nunca no lugar dele.</p>' +
+      camposEndereco({}) + blocoRede({ tipo: 'END', id: '', lat: local.lat, lon: local.lon, mun: local.mun, d: {}, novo: true }) +
+      F.caixa('registrarVisita', 'Registrar visita agora', true) + rodapeForm() + '</form>', 'form-end-novo');
     marcarLocal([local.lat, local.lon]);
   }
   function abrirFormNovaProp(local) {
@@ -1420,6 +1493,8 @@
   function salvarFormulario(form) {
     var tipo = form.getAttribute('data-form'), id = form.getAttribute('data-id');
     if (tipo === 'usuario') return salvarUsuario(form);
+    if (tipo === 'rede-param') return calcularSugestoes(form);
+    if (tipo === 'rede-aprovar') return aprovarRede(form);
     if (tipo === 'municipios') {
       var cods = Array.prototype.filter.call(form.querySelectorAll('input[name=mun]'), function (i) { return i.checked; })
         .map(function (i) { return i.value; });
@@ -1430,6 +1505,7 @@
       return sincronizar(false);
     }
     var v = F.ler(form);
+    var redeItem = extrairContatoRede(form, v);
     var local = form.hasAttribute('data-lat') ? {
       lat: Number(form.getAttribute('data-lat')), lon: Number(form.getAttribute('data-lon')),
       precisao: Number(form.getAttribute('data-prec')) || 0, fonte: form.getAttribute('data-fonte')
@@ -1454,13 +1530,13 @@
       var item = { tipo: ehEnd ? 'END_EDITAR' : 'PROP_EDITAR', alvoId: id, dados: alteracoes(x.d), registrarVisita: registrarVisita };
       if (corrigir) item.novaPosicao = posGps();
       if (!Object.keys(item.dados).length && !item.novaPosicao) {
-        if (!registrarVisita) throw new Error('Nada foi alterado.');
-        item = { tipo: ehEnd ? 'END_VISITA' : 'PROP_VISITA', alvoId: id };
+        if (!registrarVisita && !redeItem) throw new Error('Nada foi alterado.');
+        item = registrarVisita ? { tipo: ehEnd ? 'END_VISITA' : 'PROP_VISITA', alvoId: id } : null;
       }
-      return concluir(item);
+      return concluir(item, redeItem);
     }
     if (tipo === 'visita') {
-      return concluir({ tipo: form.getAttribute('data-tipo') === 'END' ? 'END_VISITA' : 'PROP_VISITA', alvoId: id, obs: v.obs || '' });
+      return concluir({ tipo: form.getAttribute('data-tipo') === 'END' ? 'END_VISITA' : 'PROP_VISITA', alvoId: id, obs: v.obs || '' }, redeItem);
     }
     if (tipo === 'excluir') {
       if (!v.motivo) throw new Error('Escolha o motivo da exclusão.');
@@ -1472,7 +1548,7 @@
       var limpo = {};
       Object.keys(v).forEach(function (k) { if (v[k]) limpo[k] = v[k]; });
       return concluir({ tipo: tipo === 'end-novo' ? 'END_NOVO' : 'PROP_NOVA', mun: mun, dados: limpo, novaPosicao: local,
-                        registrarVisita: registrarVisita, idPropriedade: form.getAttribute('data-prop') || '' });
+                        registrarVisita: registrarVisita, idPropriedade: form.getAttribute('data-prop') || '' }, redeItem);
     }
     if (tipo === 'via') {
       if (!v.TIPO_VIA || !v.CONDICAO || !v.TRAFEGAVEL_VIATURA) throw new Error('Preencha tipo, condição e se passa viatura.');
@@ -1486,9 +1562,10 @@
   }
 
   /** Salva e reabre a ficha atualizada (ou fecha, se o registro saiu do mapa). */
-  function concluir(item) {
+  function concluir(item, extra) {
     removerMarcaLocal();
-    return registrar(item).then(function (alvo) {
+    if (!item) { item = extra; extra = null; }
+    return registrar(item, extra).then(function (alvo) {
       if (!alvo) return fecharPainel();
       if (alvo.tipo === 'END' && E.endPorId[alvo.id]) return abrirFichaEnd(E.endPorId[alvo.id], true);
       if (alvo.tipo === 'PROP' && E.propPorId[alvo.id]) return abrirFichaProp(E.propPorId[alvo.id], true);
@@ -1670,6 +1747,7 @@
       opcaoCamada('ends', 'Endereços', '<span class="bolinha" style="background:' + COR_SITUACAO.NAO_VALIDADO + '"></span>', E.ends.length) +
       opcaoCamada('vias', 'Trechos de via (IBGE)', '<span class="linha-amostra"></span>', E.vias.length) +
       opcaoCamada('pontos', 'Pontos de interesse', '<span class="marca-ponto mini" style="background:#3f51b5">P</span>', E.pontos.length) +
+      opcaoCamada('redes', 'Redes de Proteção Preventiva', '<span class="amostra-rede"></span>', E.redes.length) +
       opcaoCamada('limites', 'Limites dos municípios', '<span class="linha-amostra limite"></span>', Object.keys(E.bases).length) + '</div>' +
       '<p class="dica">Os limites das propriedades aparecem ao aproximar o mapa.</p>' +
       '<h3>Situação</h3><div class="opcoes">' +
@@ -1734,6 +1812,7 @@
       '<div class="info-linha"><span>Acesso válido até</span><span>' + fmtDataHora(E.sessao && E.sessao.expira) + '</span></div>' +
       '<div class="menu-acoes">' + (E.municipios.length > 1 ? '<button class="btn btn-secundario" data-menu="municipios"' + (navigator.onLine ? '' : ' disabled') +
         '>Municípios neste aparelho (' + Object.keys(E.bases).length + ' de ' + E.municipios.length + ')</button>' : '') +
+      (String(u.perfil).toUpperCase() === 'ADMIN' ? '<button class="btn btn-secundario" data-menu="redes">Sugerir Redes de Proteção Preventiva</button>' : '') +
       (String(u.perfil).toUpperCase() === 'ADMIN' ? '<button class="btn btn-secundario" data-menu="usuarios"' + (navigator.onLine ? '' : ' disabled') + '>Usuários (cadastro e senhas)</button>' : '') +
       '<button class="btn btn-primario" data-menu="sync"' + (navigator.onLine ? '' : ' disabled') + '>' +
       (E.fila.length ? 'Enviar pendentes e atualizar' : 'Atualizar dados agora') + '</button>' +
@@ -1749,12 +1828,435 @@
     if (b.getAttribute('data-menu') === 'sync') { fecharPainel(); sincronizar(false); }
     if (b.getAttribute('data-menu') === 'municipios') abrirEscolhaMunicipios(false);
     if (b.getAttribute('data-menu') === 'usuarios') abrirUsuarios();
+    if (b.getAttribute('data-menu') === 'redes') abrirParametrosRede();
     if (b.getAttribute('data-menu') === 'sair') {
       if (confirm(E.fila.length ? 'ATENÇÃO: ' + E.fila.length + ' envio(s) ainda não enviados serão PERDIDOS. Sair mesmo assim?'
                                 : 'Sair? Os dados baixados serão apagados deste aparelho.')) sair();
     }
   });
 
+
+
+  /* ================================================================ */
+  /* Redes de Proteção Preventiva: sugestão automática por proximidade  */
+  /* (Instrução 3.03.08/2022, 5ª fase). O ADMIN aprova ou descarta.     */
+  /* ================================================================ */
+  var SUG = { lista: [], isolados: [], param: null, mun: null };
+  var COR_REDE = '#7b1fa2', COR_SUG = '#e65100';
+  var TIPOS_REDE = [['Domicílio particular', 'Domicílios'], ['Estabelecimento agropecuário', 'Estabelecimentos agropecuários'], ['OUTROS', 'Outros (escola, igreja, saúde…)']];
+  var PARAM_REDE = Object.assign({ min: 5, max: 25, vizinho: 800, raio: 2000, tipos: ['Domicílio particular', 'Estabelecimento agropecuário'] }, LS.get('paramRede') || {});
+
+  function montarRedes() {
+    E.redes = objetos(E.campo.redes || { cols: ['ID'], rows: [] }).filter(function (r) {
+      return String(r.STATUS).toUpperCase() === 'ATIVA' && E.bases[r.COD_MUNICIPIO];
+    }).map(function (r) {
+      var rede = { tipo: 'REDE', id: r.ID, mun: r.COD_MUNICIPIO, nome: r.NOME, nomeLocal: r.NOME_LOCAL, d: r,
+                   ids: String(r.ENDERECOS || '').split(';').filter(Boolean),
+                   lat: numero(r.CENTRO_LAT), lon: numero(r.CENTRO_LON), raio: numero(r.RAIO_M) || 0 };
+      rede.ids.forEach(function (id) { E.redePorEnd[id] = rede; });
+      return rede;
+    });
+  }
+  function projetor(lat0) {
+    var kx = Math.cos(lat0 * Math.PI / 180) * 111320, ky = 110540;
+    return { x: function (lon) { return lon * kx; }, y: function (lat) { return lat * ky; },
+             lon: function (x) { return x / kx; }, lat: function (y) { return y / ky; } };
+  }
+  /** Contorno (casca convexa com folga) de um conjunto de endereços, em [lat, lon]. */
+  function contorno(pts, folga) {
+    if (!pts.length) return [];
+    var P = projetor(pts[0].lat);
+    var xy = pts.map(function (p) { return [P.x(p.lon), P.y(p.lat)]; });
+    var cx = 0, cy = 0; xy.forEach(function (q) { cx += q[0]; cy += q[1]; }); cx /= xy.length; cy /= xy.length;
+    var casca;
+    var unicos = {}; xy.forEach(function (q) { unicos[Math.round(q[0]) + ',' + Math.round(q[1])] = q; });
+    var u = Object.keys(unicos).map(function (k) { return unicos[k]; });
+    if (u.length < 3) {
+      var r0 = 0; u.forEach(function (q) { r0 = Math.max(r0, Math.hypot(q[0] - cx, q[1] - cy)); });
+      casca = []; for (var a = 0; a < 16; a++) casca.push([cx + (r0 + folga) * Math.cos(a * Math.PI / 8), cy + (r0 + folga) * Math.sin(a * Math.PI / 8)]);
+    } else {
+      u.sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+      var cruz = function (o, a, b) { return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]); };
+      var baixo = [], cima = [];
+      u.forEach(function (q) { while (baixo.length >= 2 && cruz(baixo[baixo.length - 2], baixo[baixo.length - 1], q) <= 0) baixo.pop(); baixo.push(q); });
+      for (var i = u.length - 1; i >= 0; i--) { var q = u[i]; while (cima.length >= 2 && cruz(cima[cima.length - 2], cima[cima.length - 1], q) <= 0) cima.pop(); cima.push(q); }
+      casca = baixo.slice(0, -1).concat(cima.slice(0, -1)).map(function (q) {
+        var dx = q[0] - cx, dy = q[1] - cy, d = Math.hypot(dx, dy) || 1;
+        return [q[0] + dx / d * folga, q[1] + dy / d * folga];
+      });
+    }
+    return casca.map(function (q) { return [P.lat(q[1]), P.lon(q[0])]; });
+  }
+  function desenharRedes() {
+    E.redes.forEach(function (r) {
+      var pts = r.ids.map(function (id) { return E.endPorId[id]; }).filter(Boolean);
+      if (!pts.length) return;
+      var pol = L.polygon(contorno(pts, 120), { renderer: E.render, color: COR_REDE, weight: 2, opacity: 0.85, fillColor: COR_REDE, fillOpacity: 0.07 });
+      pol.on('click', function (ev) { L.DomEvent.stopPropagation(ev); abrirFichaRede(r); });
+      E.g.redes.addLayer(pol);
+    });
+  }
+  function abrirFichaRede(r) {
+    var pts = r.ids.map(function (id) { return E.endPorId[id]; }).filter(Boolean);
+    var admin = String(((E.sessao || {}).usuario || {}).perfil).toUpperCase() === 'ADMIN';
+    var visitados = pts.filter(function (e) { return e.d.DATA_ULTIMA_VISITA; }).length;
+    var html = '<p class="ficha-tipo"><span class="amostra-rede"></span>Rede de Proteção Preventiva</p><h2>' + esc(r.nome) + '</h2>' +
+      (r.nomeLocal ? '<p class="vazio" style="padding:0">Nome local: ' + esc(r.nomeLocal) + ' <small class="nao-oficial">não oficial</small></p>' : '') +
+      grupo('Resumo', campo('Município', esc(nomeMunicipio(r.mun))) + campo('Endereços', fmtNum(r.ids.length)) +
+        campo('Aderiram', fmtNum(pts.filter(function (e) { return adesaoDe(e, r) === 'ADERIU'; }).length) + ' · não querem ' +
+          fmtNum(pts.filter(function (e) { return adesaoDe(e, r) === 'NAO_QUER'; }).length)) +
+        campo('Grupo WhatsApp', esc(textoGrupo(r.d)) + (r.d.GRUPO_CONTATO ? '<br>' + tel(r.d.GRUPO_CONTATO) : '')) +
+        campo('Já visitados', fmtNum(visitados) + ' de ' + fmtNum(pts.length)) + campo('Raio', fmtDist(r.raio)) +
+        campo('Aprovada por', esc(r.d.CRIADO_POR) + ' em ' + esc(fmtDataHora(r.d.CRIADO_EM)))) +
+      '<h3>Integrantes</h3><ul class="resultados">' + pts.slice(0, 60).map(function (e) {
+        var ad = adesaoDe(e, r);
+        return '<li><button class="resultado" data-abrir-end="' + esc(e.id) + '"><span class="marca-adesao ' + (ad ? 'a-' + ad.toLowerCase() : 'a-pendente') + '"></span>' +
+          '<span class="txt"><span class="t1">' + esc(e.d.MORADOR || e.titulo) + '</span><span class="t2">' + esc([e.especie, e.d.LOCALIDADE].filter(Boolean).join(' · ')) + '</span></span></button></li>';
+      }).join('') + '</ul>' + (pts.length > 60 ? '<p class="dica">… e mais ' + (pts.length - 60) + '.</p>' : '') +
+      (admin ? '<div class="acoes"><button class="btn btn-perigo-leve largo" data-rede-remover="' + esc(r.id) + '">Desfazer esta rede</button></div>' : '') +
+      '<p class="rodape-ficha">ID ' + esc(r.id) + '</p>';
+    abrirPainel(html, 'ficha-rede');
+  }
+
+  function abrirParametrosRede() {
+    var munis = E.municipios.filter(function (m) { return E.bases[m.cod]; });
+    if (!munis.length) { toast('Nenhum município baixado neste aparelho.'); return; }
+    var c0 = E.mapa.getCenter(), aqui = municipioEm(c0.lat, c0.lng);
+    var atual = SUG.mun || (aqui && E.bases[aqui] ? aqui : munis[0].cod);
+    var p = PARAM_REDE;
+    var html = '<h2>Sugerir Redes de Proteção</h2>' +
+      '<p class="dica">O sistema agrupa os endereços vizinhos que ainda não estão em nenhuma rede. Você ajusta os limites, confere no mapa e aprova ou descarta cada sugestão.</p>' +
+      '<form data-form="rede-param" novalidate>' +
+      '<label class="campo">Município<select name="mun">' + munis.map(function (m) {
+        return '<option value="' + esc(m.cod) + '"' + (m.cod === atual ? ' selected' : '') + '>' + esc(m.nome) + '</option>'; }).join('') + '</select></label>' +
+      '<div class="grade2">' +
+      '<label class="campo">Mínimo de endereços<input type="number" name="min" min="2" max="100" value="' + p.min + '" inputmode="numeric"></label>' +
+      '<label class="campo">Máximo de endereços<input type="number" name="max" min="3" max="300" value="' + p.max + '" inputmode="numeric"></label>' +
+      '<label class="campo">Distância entre vizinhos (m)<input type="number" name="vizinho" min="100" max="5000" step="50" value="' + p.vizinho + '" inputmode="numeric"></label>' +
+      '<label class="campo">Raio máximo da rede (m)<input type="number" name="raio" min="300" max="20000" step="100" value="' + p.raio + '" inputmode="numeric"></label></div>' +
+      '<p class="dica" style="margin-top:-4px">Vizinhos: dois endereços a menos desta distância podem ficar na mesma rede. Raio: distância máxima do centro da rede até o endereço mais afastado.</p>' +
+      '<div class="campo"><span>Incluir</span><div class="chips">' + TIPOS_REDE.map(function (t) {
+        return '<label class="chip"><input type="checkbox" name="tipos" value="' + esc(t[0]) + '"' + (p.tipos.indexOf(t[0]) !== -1 ? ' checked' : '') + '><span>' + esc(t[1]) + '</span></label>';
+      }).join('') + '</div></div>' +
+      '<p class="erro" data-erro></p><div class="acoes"><button type="button" class="btn btn-secundario" data-acao="cancelar">Fechar</button>' +
+      '<button type="submit" class="btn btn-primario">Calcular sugestões</button></div></form>' +
+      (SUG.lista.length ? '<div class="menu-acoes"><button class="btn btn-secundario" data-sug-lista>Ver as ' + SUG.lista.length + ' sugestões calculadas</button>' +
+        '<button class="btn btn-secundario" data-sug-limpar>Limpar sugestões do mapa</button></div>' : '');
+    abrirPainel(html, 'form-rede');
+  }
+  function lerParametros(form) {
+    var v = F.ler(form);
+    var p = { min: Math.round(Number(v.min)), max: Math.round(Number(v.max)), vizinho: Math.round(Number(v.vizinho)), raio: Math.round(Number(v.raio)),
+              tipos: listaDe(v.tipos) };
+    if (!(p.min >= 2 && p.min <= 100)) throw new Error('Mínimo de endereços: entre 2 e 100.');
+    if (!(p.max >= p.min && p.max <= 300)) throw new Error('Máximo de endereços: entre o mínimo e 300.');
+    if (!(p.vizinho >= 100 && p.vizinho <= 5000)) throw new Error('Distância entre vizinhos: entre 100 e 5.000 m.');
+    if (!(p.raio >= 300 && p.raio <= 20000)) throw new Error('Raio máximo: entre 300 e 20.000 m.');
+    if (!p.tipos.length) throw new Error('Marque pelo menos um tipo de endereço.');
+    return { p: p, mun: v.mun };
+  }
+  function calcularSugestoes(form) {
+    var lp = lerParametros(form);
+    PARAM_REDE = lp.p; LS.set('paramRede', PARAM_REDE);
+    var r = agruparEnderecos(lp.mun, lp.p);
+    SUG.lista = r.grupos; SUG.isolados = r.isolados; SUG.param = lp.p; SUG.mun = lp.mun; SUG.total = r.total;
+    desenharSugestoes();
+    if (SUG.lista.length) {
+      var b = L.latLngBounds([]); SUG.lista.forEach(function (g) { b.extend(g.contorno); });
+      E.mapa.fitBounds(b, { padding: [30, 30] });
+    }
+    listarSugestoes();
+  }
+
+  /** Agrupamento: componentes por distância entre vizinhos, depois divisão (2-médias) até caber no máximo e no raio. */
+  function agruparEnderecos(mun, p) {
+    var outros = p.tipos.indexOf('OUTROS') !== -1;
+    var pts = E.ends.filter(function (e) {
+      if (e.mun !== mun || e.excluido || E.redePorEnd[e.id]) return false;
+      return p.tipos.indexOf(e.especie) !== -1 || (outros && e.especie !== 'Domicílio particular' && e.especie !== 'Estabelecimento agropecuário');
+    });
+    if (!pts.length) return { grupos: [], isolados: [], total: 0 };
+    var P = projetor(pts[0].lat);
+    pts.forEach(function (e) { e._x = P.x(e.lon); e._y = P.y(e.lat); });
+    // 1) componentes conexos (grade com célula = distância entre vizinhos)
+    var pai = pts.map(function (_, i) { return i; });
+    function raiz(i) { while (pai[i] !== i) { pai[i] = pai[pai[i]]; i = pai[i]; } return i; }
+    var L2 = p.vizinho * p.vizinho, grade = {};
+    pts.forEach(function (e, i) {
+      var cx = Math.floor(e._x / p.vizinho), cy = Math.floor(e._y / p.vizinho);
+      for (var a = -1; a <= 1; a++) for (var b = -1; b <= 1; b++) {
+        (grade[(cx + a) + ':' + (cy + b)] || []).forEach(function (j) {
+          var dx = e._x - pts[j]._x, dy = e._y - pts[j]._y;
+          if (dx * dx + dy * dy <= L2) { var ri = raiz(i), rj = raiz(j); if (ri !== rj) pai[ri] = rj; }
+        });
+      }
+      (grade[cx + ':' + cy] = grade[cx + ':' + cy] || []).push(i);
+    });
+    var comp = {};
+    pts.forEach(function (e, i) { var r = raiz(i); (comp[r] = comp[r] || []).push(e); });
+    // 2) divide os grandes demais
+    function centro(g) { var x = 0, y = 0; g.forEach(function (e) { x += e._x; y += e._y; }); return [x / g.length, y / g.length]; }
+    function raioDe(g, c) { var m = 0; g.forEach(function (e) { m = Math.max(m, Math.hypot(e._x - c[0], e._y - c[1])); }); return m; }
+    function dividir(g) {
+      var c = centro(g);
+      if (g.length <= p.max && raioDe(g, c) <= p.raio) return [g];
+      var a = g[0], dm = -1;
+      g.forEach(function (e) { var d = Math.hypot(e._x - c[0], e._y - c[1]); if (d > dm) { dm = d; a = e; } });
+      var b = a; dm = -1;
+      g.forEach(function (e) { var d = Math.hypot(e._x - a._x, e._y - a._y); if (d > dm) { dm = d; b = e; } });
+      var ca = [a._x, a._y], cb = [b._x, b._y], ga = [], gb = [];
+      for (var it = 0; it < 10; it++) {
+        ga = []; gb = [];
+        g.forEach(function (e) { (Math.hypot(e._x - ca[0], e._y - ca[1]) <= Math.hypot(e._x - cb[0], e._y - cb[1]) ? ga : gb).push(e); });
+        if (!ga.length || !gb.length) break;
+        ca = centro(ga); cb = centro(gb);
+      }
+      if (!ga.length || !gb.length) { // pontos coincidentes: corta pela metade
+        var o = g.slice().sort(function (x, y) { return x._x - y._x || x._y - y._y; });
+        ga = o.slice(0, Math.ceil(o.length / 2)); gb = o.slice(Math.ceil(o.length / 2));
+      }
+      return dividir(ga).concat(dividir(gb));
+    }
+    var grupos = [];
+    Object.keys(comp).forEach(function (k) { grupos = grupos.concat(dividir(comp[k])); });
+    // 3) pequenos: tenta juntar ao grupo vizinho se couber; senão ficam isolados
+    var validos = grupos.filter(function (g) { return g.length >= p.min; });
+    var pequenos = grupos.filter(function (g) { return g.length < p.min; });
+    var isolados = [];
+    pequenos.forEach(function (g) {
+      var c = centro(g), melhor = null, dm = Infinity;
+      validos.forEach(function (v) {
+        if (v.length + g.length > p.max) return;
+        var cv = centro(v);
+        if (Math.hypot(cv[0] - c[0], cv[1] - c[1]) > p.raio + p.vizinho) return;
+        var d = Infinity;
+        g.forEach(function (e) { v.forEach(function (f) { d = Math.min(d, Math.hypot(e._x - f._x, e._y - f._y)); }); });
+        if (d <= p.vizinho && d < dm) { var u = v.concat(g); if (raioDe(u, centro(u)) <= p.raio) { dm = d; melhor = v; } }
+      });
+      if (melhor) Array.prototype.push.apply(melhor, g); else isolados = isolados.concat(g);
+    });
+    var nomesUsados = {};
+    var lista = validos.map(function (g) {
+      var c = centro(g), cont = {};
+      g.forEach(function (e) { var l = String(e.d.LOCALIDADE || '').trim(); if (l) cont[l] = (cont[l] || 0) + 1; });
+      var locs = Object.keys(cont).sort(function (a, b) { return cont[b] - cont[a]; });
+      var props = {}; g.forEach(function (e) { if (e.idProp) props[e.idProp] = true; });
+      return { ends: g, lat: P.lat(c[1]), lon: P.lon(c[0]), raio: raioDe(g, c), localidades: locs,
+               nProps: Object.keys(props).length, contorno: contorno(g, 120) };
+    }).sort(function (a, b) { return b.ends.length - a.ends.length; });
+    lista.forEach(function (g, i) {
+      var base = g.localidades[0] || ('Rede ' + nomeMunicipio(mun));
+      nomesUsados[base] = (nomesUsados[base] || 0) + 1;
+      g.nomeSugerido = base; g.num = i + 1; g.seq = nomesUsados[base];
+    });
+    lista.forEach(function (g) { if (nomesUsados[g.nomeSugerido] > 1) g.nomeSugerido += ' ' + g.seq; });
+    return { grupos: lista, isolados: isolados, total: pts.length };
+  }
+
+  function desenharSugestoes() {
+    E.g.sugest.clearLayers();
+    SUG.lista.forEach(function (g, i) {
+      var pol = L.polygon(g.contorno, { renderer: E.render, color: COR_SUG, weight: 2, dashArray: '6 5', fillColor: COR_SUG, fillOpacity: 0.1 });
+      pol.bindTooltip(String(g.num), { permanent: true, direction: 'center', className: 'rotulo-sug' });
+      pol.on('click', function (ev) { L.DomEvent.stopPropagation(ev); abrirSugestao(i); });
+      E.g.sugest.addLayer(pol);
+    });
+    SUG.isolados.forEach(function (e) {
+      E.g.sugest.addLayer(L.circleMarker([e.lat, e.lon], { renderer: E.render, radius: 9, color: '#c62828', weight: 2, fill: false, interactive: false }));
+    });
+  }
+  function listarSugestoes() {
+    var p = SUG.param, emRede = 0;
+    SUG.lista.forEach(function (g) { emRede += g.ends.length; });
+    var html = '<h2>Sugestões · ' + esc(nomeMunicipio(SUG.mun)) + '</h2>' +
+      '<p class="vazio" style="padding:0">' + p.min + ' a ' + p.max + ' endereços · vizinhos até ' + fmtDist(p.vizinho) + ' · raio até ' + fmtDist(p.raio) + '</p>' +
+      '<div class="info-linha"><span>Sugestões de rede</span><span><b>' + SUG.lista.length + '</b></span></div>' +
+      '<div class="info-linha"><span>Endereços nas sugestões</span><span>' + fmtNum(emRede) + ' de ' + fmtNum(SUG.total) + '</span></div>' +
+      '<div class="info-linha"><span>Isolados (círculo vermelho no mapa)</span><span>' + fmtNum(SUG.isolados.length) + '</span></div>' +
+      (SUG.isolados.length ? '<p class="dica">Endereços isolados não se encaixam em nenhuma rede com esses limites. Merecem atenção nas visitas: são os mais vulneráveis.</p>' : '') +
+      '<div class="menu-acoes" style="margin-top:8px"><button class="btn btn-secundario" data-menu="redes">Ajustar limites e recalcular</button></div>' +
+      (SUG.lista.length ? '<h3>Toque para conferir e aprovar</h3><ul class="resultados">' + SUG.lista.map(function (g, i) {
+        return '<li><button class="resultado" data-sug-abrir="' + i + '"><span class="num-sug">' + g.num + '</span><span class="txt"><span class="t1">' + esc(g.nomeSugerido) + '</span>' +
+          '<span class="t2">' + g.ends.length + ' endereços · raio ' + fmtDist(g.raio) + (g.nProps ? ' · ' + g.nProps + ' imóveis CAR' : '') + '</span></span></button></li>';
+      }).join('') + '</ul>' : '<p class="vazio">Nenhum grupo atende a esses limites. Aumente a distância entre vizinhos ou diminua o mínimo de endereços.</p>');
+    abrirPainel(html, 'sugestoes');
+  }
+  function abrirSugestao(i) {
+    var g = SUG.lista[i];
+    if (!g) return;
+    var tipos = {}; g.ends.forEach(function (e) { tipos[e.especie] = (tipos[e.especie] || 0) + 1; });
+    var visit = g.ends.filter(function (e) { return e.d.DATA_ULTIMA_VISITA; }).length;
+    var nomes = [g.nomeSugerido].concat(g.localidades.slice(1));
+    var html = '<p class="ficha-tipo"><span class="num-sug">' + g.num + '</span>Sugestão de Rede de Proteção</p><h2>' + esc(g.nomeSugerido) + '</h2>' +
+      grupo('Resumo', campo('Endereços', fmtNum(g.ends.length)) + campo('Raio', fmtDist(g.raio)) + campo('Imóveis CAR', fmtNum(g.nProps)) +
+        campo('Já visitados', fmtNum(visit)) + campo('Tipos', esc(Object.keys(tipos).map(function (t) { return t + ' (' + tipos[t] + ')'; }).join(', ')))) +
+      '<form data-form="rede-aprovar" data-sug="' + i + '" novalidate>' +
+      '<label class="campo">Nome da rede <small class="oficial">localidade oficial IBGE</small><select name="nome">' + nomes.map(function (n, k) {
+        return '<option' + (k === 0 ? ' selected' : '') + '>' + esc(n) + '</option>'; }).join('') + '</select></label>' +
+      '<label class="campo">Nome local <small class="nao-oficial">não oficial · opcional</small><input name="nomeLocal" maxlength="120" placeholder="Como a comunidade chama"></label>' +
+      '<p class="erro" data-erro></p><div class="acoes"><button type="button" class="btn btn-secundario" data-sug-descartar="' + i + '">Descartar</button>' +
+      '<button type="submit" class="btn btn-primario">Aprovar rede</button></div></form>' +
+      '<div class="menu-acoes"><button class="btn btn-secundario" data-sug-ver="' + i + '">Ver no mapa</button>' +
+      '<button class="btn btn-secundario" data-sug-lista>Voltar à lista</button></div>' +
+      '<h3>Endereços</h3><ul class="resultados">' + g.ends.slice(0, 40).map(function (e) {
+        return '<li><button class="resultado" data-abrir-end="' + esc(e.id) + '"><span class="bolinha" style="background:' + corEnd(e) + '"></span>' +
+          '<span class="txt"><span class="t1">' + esc(e.d.MORADOR || e.titulo) + '</span><span class="t2">' + esc([e.especie, e.d.LOCALIDADE].filter(Boolean).join(' · ')) + '</span></span></button></li>';
+      }).join('') + '</ul>' + (g.ends.length > 40 ? '<p class="dica">… e mais ' + (g.ends.length - 40) + '.</p>' : '');
+    abrirPainel(html, 'sugestao');
+  }
+  function removerSugestao(i) {
+    SUG.lista.splice(i, 1);
+    desenharSugestoes();
+  }
+  function aprovarRede(form) {
+    var i = Number(form.getAttribute('data-sug')), g = SUG.lista[i];
+    if (!g) throw new Error('Sugestão não encontrada. Recalcule.');
+    if (!navigator.onLine) throw new Error('Aprovar uma rede precisa de internet.');
+    var v = F.ler(form), btn = form.querySelector('button[type=submit]'), erro = form.querySelector('[data-erro]');
+    btn.disabled = true; btn.textContent = 'Salvando…';
+    return api('redeSalvar', { token: E.sessao.token, op: 'aprovar', rede: {
+      mun: SUG.mun, nome: v.nome, nomeLocal: v.nomeLocal, lat: g.lat, lon: g.lon, raio: g.raio,
+      enderecos: g.ends.map(function (e) { return e.id; }), parametros: SUG.param } }).then(function (r) {
+      E.campo.redes = E.campo.redes || { cols: ['ID'], rows: [] };
+      var t = E.campo.redes;
+      Object.keys(r.rede).forEach(function (c) { if (t.cols.indexOf(c) === -1) { t.cols.push(c); t.rows.forEach(function (x) { x.push(''); }); } });
+      t.rows.push(t.cols.map(function (c) { return r.rede[c] === undefined ? '' : r.rede[c]; }));
+      IDB.set('campo', E.campo);
+      removerSugestao(i);
+      E.redePorEnd = {}; montarRedes(); E.g.redes.clearLayers(); desenharRedes();
+      toast('Rede "' + v.nome + '" aprovada com ' + g.ends.length + ' endereços.');
+      listarSugestoes();
+    }).catch(function (e) {
+      if (e.sessaoInvalida) return sessaoExpirou(e.message);
+      btn.disabled = false; btn.textContent = 'Aprovar rede'; erro.textContent = e.message;
+    });
+  }
+  $('#painel-conteudo').addEventListener('click', function (ev) {
+    var t = ev.target, b;
+    if ((b = t.closest('[data-sug-abrir]'))) abrirSugestao(Number(b.getAttribute('data-sug-abrir')));
+    else if (t.closest('[data-sug-lista]')) listarSugestoes();
+    else if (t.closest('[data-sug-limpar]')) { SUG.lista = []; SUG.isolados = []; desenharSugestoes(); fecharPainel(); }
+    else if ((b = t.closest('[data-sug-ver]'))) {
+      var g = SUG.lista[Number(b.getAttribute('data-sug-ver'))];
+      fecharPainel(); if (g) E.mapa.fitBounds(L.latLngBounds(g.contorno), { padding: [40, 40] });
+      toast('Toque na área tracejada para aprovar ou descartar.');
+    } else if ((b = t.closest('[data-sug-descartar]'))) {
+      removerSugestao(Number(b.getAttribute('data-sug-descartar'))); toast('Sugestão descartada.'); listarSugestoes();
+    } else if ((b = t.closest('[data-abrir-rede]'))) {
+      var r = E.redes.filter(function (x) { return x.id === b.getAttribute('data-abrir-rede'); })[0]; if (r) abrirFichaRede(r);
+    } else if ((b = t.closest('[data-rede-remover]'))) {
+      if (!confirm('Desfazer esta rede? Os endereços voltam a ficar livres para novas sugestões.')) return;
+      b.disabled = true;
+      api('redeSalvar', { token: E.sessao.token, op: 'remover', id: b.getAttribute('data-rede-remover') }).then(function (r) {
+        var tab = E.campo.redes, iId = tab.cols.indexOf('ID'), iSt = tab.cols.indexOf('STATUS');
+        tab.rows.forEach(function (x) { if (x[iId] === r.id) x[iSt] = 'REMOVIDA'; });
+        IDB.set('campo', E.campo);
+        E.redePorEnd = {}; montarRedes(); E.g.redes.clearLayers(); desenharRedes();
+        fecharPainel(); toast('Rede desfeita.');
+      }).catch(function (e) { if (e.sessaoInvalida) return sessaoExpirou(e.message); b.disabled = false; toast(e.message, { duracao: 6000 }); });
+    }
+  });
+
+
+  /* ---- Rede de Proteção no atendimento ao morador ---- */
+  var ADESAO_TXT = { ADERIU: 'Aderiu à rede', NAO_QUER: 'Não quer participar', NAO_FOI_POSSIVEL: 'Não foi possível conversar' };
+  function adesaoDe(x, rede) { return x && x.d && rede && x.d.REDE_ID === rede.id ? x.d.REDE_ADESAO || '' : ''; }
+  /** Rede do endereço (membro), da propriedade (por um endereço dela) ou rede próxima (para convidar). */
+  function redeDe(x) {
+    if (!x) return null;
+    if (x.tipo === 'END' && x.id && E.redePorEnd[x.id]) return E.redePorEnd[x.id];
+    if (x.tipo === 'PROP' && x.ends) { for (var k = 0; k < x.ends.length; k++) if (E.redePorEnd[x.ends[k].id]) return E.redePorEnd[x.ends[k].id]; }
+    if (x.tipo === 'PROP' && x.d && x.d.REDE_ID) { var rr = E.redes.filter(function (r) { return r.id === x.d.REDE_ID; })[0]; if (rr) return rr; }
+    return null;
+  }
+  function redeProxima(x) {
+    var melhor = null, dm = Infinity;
+    E.redes.forEach(function (r) {
+      if (r.mun !== x.mun || r.lat === null) return;
+      var d = distanciaM(x.lat, x.lon, r.lat, r.lon);
+      if (d <= r.raio + 400 && d < dm) { dm = d; melhor = r; }
+    });
+    return melhor;
+  }
+  function linkRede(rede, x) {
+    if (!rede) return '';
+    var a = adesaoDe(x, rede);
+    return '<button class="link-prop" data-abrir-rede="' + esc(rede.id) + '"><span class="amostra-rede"></span><span>Rede de Proteção: <strong>' + esc(rede.nome) + '</strong>' +
+      '<br><small class="adesao ' + (a ? 'a-' + a.toLowerCase() : 'a-pendente') + '">' + esc(a ? ADESAO_TXT[a] : 'Morador ainda não consultado') + '</small></span> ›</button>';
+  }
+  function membrosRede(rede) {
+    return rede.ids.map(function (id) { return E.endPorId[id]; }).filter(Boolean).map(function (e) {
+      var p = E.propPorId[e.idProp];
+      var nomeProp = p && p.d.NOME_PROPRIEDADE;
+      var partes = [e.d.MORADOR ? nomeProp : '', e.d.NOME_LOCAL, e.titulo, e.d.LOCALIDADE].filter(function (x, k, arr) { return x && arr.indexOf(x) === k; });
+      return { e: e, nome: e.d.MORADOR || nomeProp || 'Morador não cadastrado', local: partes.join(' · '),
+               adesao: adesaoDe(e, rede) };
+    }).sort(function (a, b) { return (b.adesao === 'ADERIU') - (a.adesao === 'ADERIU') || String(a.nome).localeCompare(String(b.nome), 'pt-BR'); });
+  }
+  function textoGrupo(rd) {
+    var g = rd.GRUPO_WHATSAPP;
+    if (g === 'SIM') return 'Sim' + (rd.GRUPO_ADMIN ? ' · adm.: ' + rd.GRUPO_ADMIN : '') + (rd.PM_NO_GRUPO === 'SIM' ? ' · PM no grupo' : '');
+    if (g === 'NAO') return 'Não tem';
+    return 'Não verificado';
+  }
+  function blocoRede(x) {
+    var rede = x.novo ? null : redeDe(x), convite = false;
+    if (!rede) { rede = redeProxima(x); convite = !!rede; }
+    if (!rede) return '';
+    var m = membrosRede(rede), ad = m.filter(function (z) { return z.adesao === 'ADERIU'; }).length, rd = rede.d;
+    var a = adesaoDe(x, rede);
+    var radio = function (nome, ops, val) {
+      return '<div class="seg3' + (ops.length === 2 ? ' seg2' : '') + '">' + ops.map(function (o) {
+        return '<label><input type="radio" name="' + nome + '" value="' + o[0] + '"' + (String(val || '') === o[0] ? ' checked' : '') + '><span>' + o[1] + '</span></label>';
+      }).join('') + '</div>';
+    };
+    return '<div class="bloco-rede" data-rede-bloco>' +
+      '<input type="hidden" name="REDE_ID" value="' + esc(rede.id) + '">' +
+      '<p class="ficha-tipo"><span class="amostra-rede"></span>Rede de Proteção Preventiva' + (convite ? ' · <b>próxima deste local</b>' : '') + '</p>' +
+      '<h3 class="titulo-rede">' + esc(rede.nome) + '</h3>' +
+      '<p class="dica">' + (convite ? 'Este local ainda não faz parte da rede. Apresente a rede ao morador e convide-o a participar.'
+                                    : 'Confirme com o morador: explique a rede e quem a integra.') + '</p>' +
+      '<div class="info-linha"><span>Integrantes</span><span>' + m.length + ' endereços · ' + ad + ' aderiram</span></div>' +
+      '<div class="info-linha"><span>Grupo de WhatsApp</span><span>' + esc(textoGrupo(rd)) + '</span></div>' +
+      '<details class="integrantes"><summary>Ver integrantes (para mostrar ao morador)</summary><ul>' + m.slice(0, 80).map(function (z) {
+        return '<li><span class="marca-adesao ' + (z.adesao ? 'a-' + z.adesao.toLowerCase() : 'a-pendente') + '"></span><span><b>' + esc(z.nome) + '</b>' +
+          (z.local ? '<small>' + esc(z.local) + '</small>' : '') + '</span></li>';
+      }).join('') + '</ul>' + (m.length > 80 ? '<p class="dica">… e mais ' + (m.length - 80) + '.</p>' : '') +
+      '<p class="legenda-adesao"><span class="marca-adesao a-aderiu"></span>aderiu <span class="marca-adesao a-nao_quer"></span>não quer <span class="marca-adesao a-pendente"></span>não consultado</p></details>' +
+      '<div class="campo"><span>Resposta do morador *</span><div class="opcoes">' + Object.keys(ADESAO_TXT).map(function (k) {
+        return '<label class="opcao opcao-form"><input type="radio" name="REDE_ADESAO" value="' + k + '"' + (a === k ? ' checked' : '') + '><span>' +
+          (convite && k === 'ADERIU' ? 'Aceitou entrar na rede' : ADESAO_TXT[k]) + '</span></label>';
+      }).join('') + '</div></div>' +
+      F.caixa('REDE_CIENCIA', 'Informei o morador sobre a rede e quem a integra', !!(x.d && x.d.REDE_CIENCIA_EM && x.d.REDE_ID === rede.id)) +
+      '<div class="campo"><span>Morador está no grupo de WhatsApp da rede?</span>' + radio('REDE_NO_GRUPO', [['SIM', 'Sim'], ['NAO', 'Não'], ['', 'Não sei']], x.d && x.d.REDE_ID === rede.id ? x.d.REDE_NO_GRUPO : '') + '</div>' +
+      '<div class="campo"><span>A rede tem grupo de WhatsApp?</span>' + radio('GRUPO_TEM', [['SIM', 'Sim'], ['NAO', 'Não'], ['NAO_SEI', 'Não sei']], rd.GRUPO_WHATSAPP || '') + '</div>' +
+      '<div class="grupo-detalhe"' + (rd.GRUPO_WHATSAPP === 'SIM' ? '' : ' hidden') + '>' +
+        F.texto('GRUPO_ADMIN', 'Administrador do grupo (nome)', rd.GRUPO_ADMIN || '', 'maxlength="80"') +
+        F.texto('GRUPO_CONTATO', 'Telefone do administrador', rd.GRUPO_CONTATO || '', 'maxlength="20" inputmode="tel"') +
+        '<div class="campo"><span>A PM participa do grupo?</span>' + radio('PM_NO_GRUPO', [['SIM', 'Sim'], ['NAO', 'Não']], rd.PM_NO_GRUPO || '') + '</div>' +
+      '</div></div>';
+  }
+  /** Lê o bloco da rede do formulário, valida e devolve o envio REDE_CONTATO (ou null). Remove os campos de v. */
+  function extrairContatoRede(form, v) {
+    var bloco = form.querySelector('[data-rede-bloco]');
+    var chaves = ['REDE_ID', 'REDE_ADESAO', 'REDE_CIENCIA', 'REDE_NO_GRUPO', 'GRUPO_TEM', 'GRUPO_ADMIN', 'GRUPO_CONTATO', 'PM_NO_GRUPO'];
+    var r = {}; chaves.forEach(function (k) { r[k] = v[k]; delete v[k]; });
+    if (!bloco) return null;
+    if (!r.REDE_ADESAO) { bloco.scrollIntoView({ block: 'start' }); throw new Error('Rede de Proteção: marque a resposta do morador.'); }
+    if (r.REDE_ADESAO !== 'NAO_FOI_POSSIVEL' && !r.REDE_CIENCIA) throw new Error('Rede de Proteção: confirme que informou o morador sobre a rede.');
+    if (r.GRUPO_CONTATO && !/^[\d\s()+-]{8,20}$/.test(r.GRUPO_CONTATO)) throw new Error('Telefone do administrador do grupo inválido.');
+    var x = form.getAttribute('data-form'), tipoAlvo = /^prop/.test(x) || form.getAttribute('data-tipo') === 'PROP' ? 'PROP' : 'END';
+    var item = { tipo: 'REDE_CONTATO', alvoTipo: tipoAlvo, alvoId: form.getAttribute('data-id') || '', redeId: r.REDE_ID,
+                 adesao: r.REDE_ADESAO, ciencia: !!r.REDE_CIENCIA, noGrupo: r.REDE_NO_GRUPO || '' };
+    if (r.GRUPO_TEM) item.grupo = { tem: r.GRUPO_TEM, admin: r.GRUPO_ADMIN || '', contato: r.GRUPO_CONTATO || '', pm: r.PM_NO_GRUPO || '' };
+    return item;
+  }
+  $('#painel-conteudo').addEventListener('change', function (ev) {
+    if (ev.target.name === 'GRUPO_TEM') {
+      var d = ev.target.closest('[data-rede-bloco]').querySelector('.grupo-detalhe');
+      if (d) d.hidden = ev.target.value !== 'SIM';
+    }
+  });
 
   /* ================================================================ */
   /* Usuários (somente perfil ADMIN; tudo é conferido no servidor)      */

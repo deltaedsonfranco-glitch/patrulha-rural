@@ -297,3 +297,39 @@ form[data-form] .acoes {
 .cartao-senha small { display: block; color: var(--texto-2); font-size: .8rem; }
 .cartao-senha b { font-size: 1.25rem; word-break: break-all; }
 .cartao-senha .senha { font-family: ui-monospace, Menlo, Consolas, monospace; letter-spacing: .08em; font-size: 1.45rem; }
+
+/* Endereço novo: nomes oficiais x nome local */
+.oficial, .nao-oficial { font-size: .7rem; font-weight: 700; padding: 2px 7px; border-radius: 9px; margin-left: 4px; vertical-align: 1px; }
+.oficial { background: #e3f3e5; color: var(--ok); }
+.nao-oficial { background: #fff0c2; color: #7a5200; }
+.ref-ibge { display: grid; gap: 2px; background: #f3f7f4; border-left: 4px solid var(--verde); border-radius: 8px; padding: 10px 12px; margin: 12px 0 4px; }
+.ref-ibge small { color: var(--texto-2); font-size: .8rem; }
+.ref-ibge span { color: var(--texto-2); font-size: .88rem; }
+.campo > .oficial, .campo > .nao-oficial { justify-self: start; margin: -4px 0 0; }
+
+/* Redes de Proteção Preventiva */
+.amostra-rede { display: inline-block; width: 16px; height: 12px; border: 2px solid #7b1fa2; background: rgba(123,31,162,.12); border-radius: 4px; margin-right: 8px; vertical-align: -1px; flex: none; }
+.num-sug { display: inline-grid; place-items: center; min-width: 28px; height: 28px; border-radius: 14px; background: #e65100; color: #fff; font-weight: 700; font-size: .85rem; flex: none; margin-right: 6px; }
+.rotulo-sug { background: #e65100; color: #fff; border: 0; border-radius: 12px; font-weight: 700; padding: 1px 8px; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+.rotulo-sug::before { display: none; }
+.grade2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+.grade2 .campo { margin: 8px 0; }
+.mapa-longe .rotulo-sug { display: none; }
+
+/* Rede de Proteção no atendimento */
+.bloco-rede { border: 2px solid #ce93d8; background: #fbf5fd; border-radius: 12px; padding: 4px 14px 8px; margin: 18px 0 8px; }
+.bloco-rede .titulo-rede { margin: 4px 0 2px; color: #4a148c; text-transform: none; letter-spacing: 0; font-size: 1.05rem; }
+.bloco-rede .info-linha { border-bottom-color: #ead6f0; }
+.integrantes { margin: 10px 0; }
+.integrantes summary { font-weight: 650; color: #6a1b9a; cursor: pointer; padding: 6px 0; }
+.integrantes ul { list-style: none; margin: 4px 0; padding: 0; max-height: 280px; overflow: auto; }
+.integrantes li { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; border-bottom: 1px solid #ead6f0; }
+.integrantes li small { display: block; color: var(--texto-2); font-size: .82rem; }
+.marca-adesao { width: 12px; height: 12px; border-radius: 50%; flex: none; margin-top: 4px; display: inline-block; }
+.resultado .marca-adesao { margin-top: 0; width: 14px; height: 14px; }
+.a-aderiu { background: #2e7d32; } .a-nao_quer { background: #c62828; } .a-nao_foi_possivel, .a-pendente { background: #b0bec5; }
+.legenda-adesao { font-size: .8rem; color: var(--texto-2); display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.legenda-adesao .marca-adesao { margin: 0 0 0 6px; }
+small.adesao { font-weight: 600; } small.a-aderiu { background: none; color: #2e7d32; } small.a-nao_quer { background: none; color: #c62828; }
+small.a-pendente, small.a-nao_foi_possivel { background: none; color: var(--texto-2); }
+.link-prop span:not(.amostra-rede):not(.marca-prop) { flex: 1; text-align: left; }
