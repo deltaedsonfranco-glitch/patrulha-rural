@@ -1,0 +1,2548 @@
+/* Patrulha Rural v2 - endereços, propriedades rurais e vias por área de atuação */
+(function () {
+  'use strict';
+
+  var VERSAO_APP = '2.5.0';
+  var C = window.CONFIG || {};
+  var MUNICIPIO_V1 = C.MUNICIPIO_V1 || '3151800';
+  var ZOOM_POLIGONOS = 13;
+  var ZOOM_DETALHE = 12;         // modo leve: endereços e vias só a partir deste zoom
+  var LIMITE_LEVE = 20000;       // acima disso (endereços + vias) o app desenha só o que está na tela
+  var MUNICIPIOS_AUTO = 8;       // áreas maiores: o militar escolhe quais municípios baixar
+  var CELULA = 0.02;             // grade espacial (graus)
+  var MAX_POLIGONOS = 3000;
+
+  var CORES_ESPECIE = {
+    'Domicílio particular': '#2f6fe0', 'Estabelecimento agropecuário': '#1f9d45',
+    'Outras finalidades': '#8e44c9', 'Estabelecimento religioso': '#e6b800',
+    'Domicílio coletivo': '#e0468a', 'Estabelecimento de saúde': '#e03131',
+    'Estabelecimento de ensino': '#f07b12'
+  };
+  var COR_PADRAO = '#6b7a72';
+  var COR_SITUACAO = { VALIDADO: '#00b050', NAO_VALIDADO: '#8d99a6' };
+  var COR_PROP = { VALIDADO: '#00a046', NAO_VALIDADO: '#d08a1e' };
+  var COR_VIA = '#ff8a00';
+  var MOTIVOS_EXCLUSAO = ['Não existe / demolido', 'Duplicado', 'Não encontrado no local', 'Outro'];
+
+  var OPCOES = {
+    TIPO_PROPRIEDADE: ['Fazenda', 'Sítio', 'Chácara', 'Granja', 'Haras', 'Pesqueiro', 'Assentamento', 'Outro'],
+    ATIVIDADES: ['Agricultura', 'Pecuária de leite', 'Pecuária de corte', 'Avicultura', 'Suinocultura',
+                 'Equinocultura', 'Piscicultura', 'Apicultura', 'Silvicultura (eucalipto)', 'Turismo rural',
+                 'Agroindústria', 'Só moradia / lazer'],
+    CULTURAS: ['Café', 'Milho', 'Soja', 'Feijão', 'Batata', 'Morango', 'Uva', 'Hortaliças', 'Frutas',
+               'Cana', 'Eucalipto', 'Pastagem'],
+    REBANHO: ['Bovinos', 'Equinos', 'Suínos', 'Ovinos/Caprinos', 'Aves'],
+    MAQUINARIO_BENS: ['Trator', 'Implementos', 'Colheitadeira', 'Ordenhadeira / tanque de leite',
+                      'Defensivos / insumos', 'Combustível', 'Ferramentas', 'Produção armazenada',
+                      'Painéis solares', 'Bomba / motor'],
+    OPERADORA: ['Vivo', 'Claro', 'TIM', 'Outra'],
+    ESPECIE_NOVA: ['Domicílio particular', 'Estabelecimento agropecuário', 'Estabelecimento religioso',
+                   'Estabelecimento de ensino', 'Estabelecimento de saúde', 'Outras finalidades'],
+    TIPO_PONTO: ['Ponte', 'Porteira', 'Mata-burro', 'Ponto com sinal de celular', 'Área de risco',
+                 'Ponto de referência', 'Ponto de apoio', 'Outro'],
+    TIPO_VIA: ['Asfalto', 'Calçamento', 'Cascalho', 'Terra', 'Trilha'],
+    CONDICAO: ['Boa', 'Regular', 'Ruim', 'Intransitável'],
+    VIATURA: ['Qualquer viatura', 'Somente 4x4', 'Somente moto ou a pé', 'Intransitável']
+  };
+  var ESTILO_PONTO = {
+    'Ponte': ['#3f51b5', 'P'], 'Porteira': ['#795548', 'T'], 'Mata-burro': ['#607d8b', 'M'],
+    'Ponto com sinal de celular': ['#00897b', 'S'], 'Área de risco': ['#d32f2f', '!'],
+    'Ponto de referência': ['#5d4037', 'R'], 'Ponto de apoio': ['#2e7d32', 'A'], 'Outro': ['#455a64', '•']
+  };
+  var RE_PLACA = /^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$/;
+  var PRECISAO_MAX_CORRECAO = 50;
+
+  /* ================================================================ */
+  /* Utilidades                                                        */
+  /* ================================================================ */
+  function $(s) { return document.querySelector(s); }
+  function esc(v) {
+    return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function normalizar(s) { return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase(); }
+  function numero(v) { var n = parseFloat(String(v == null ? '' : v).replace(',', '.')); return isFinite(n) ? n : null; }
+  function distanciaM(lat1, lon1, lat2, lon2) {
+    var r = Math.PI / 180;
+    var a = Math.pow(Math.sin((lat2 - lat1) * r / 2), 2) +
+            Math.cos(lat1 * r) * Math.cos(lat2 * r) * Math.pow(Math.sin((lon2 - lon1) * r / 2), 2);
+    return 6371008.8 * 2 * Math.asin(Math.sqrt(a));
+  }
+  function rumo(lat1, lon1, lat2, lon2) {
+    var r = Math.PI / 180;
+    var y = Math.sin((lon2 - lon1) * r) * Math.cos(lat2 * r);
+    var x = Math.cos(lat1 * r) * Math.sin(lat2 * r) - Math.sin(lat1 * r) * Math.cos(lat2 * r) * Math.cos((lon2 - lon1) * r);
+    return ['N', 'NE', 'L', 'SE', 'S', 'SO', 'O', 'NO'][Math.round(((Math.atan2(y, x) / r + 360) % 360) / 45) % 8];
+  }
+  function fmtDist(m) { return m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(m < 10000 ? 1 : 0).replace('.', ',') + ' km'; }
+  function fmtNum(n) { return Number(n || 0).toLocaleString('pt-BR'); }
+  function p2(n) { return ('0' + n).slice(-2); }
+  function fmtDataHora(iso) {
+    var d = new Date(iso);
+    if (!iso || isNaN(d)) return '—';
+    return p2(d.getDate()) + '/' + p2(d.getMonth() + 1) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes());
+  }
+  function fmtDataCompleta(iso) {
+    var d = new Date(iso);
+    if (!iso || isNaN(d)) return '';
+    return p2(d.getDate()) + '/' + p2(d.getMonth() + 1) + '/' + d.getFullYear() + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes());
+  }
+  function haQuanto(iso) {
+    var d = new Date(iso);
+    if (!iso || isNaN(d)) return '';
+    var dias = Math.floor((Date.now() - d.getTime()) / 86400000);
+    return dias <= 0 ? 'hoje' : dias === 1 ? 'ontem' : dias < 60 ? 'há ' + dias + ' dias' : 'há ' + Math.round(dias / 30) + ' meses';
+  }
+  function novoUid() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+      var r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+    });
+  }
+  function uidCurto(uid) { return String(uid).replace(/-/g, '').slice(0, 12); }
+  function listaDe(v) { return String(v || '').split(/\s*;\s*/).filter(Boolean); }
+  function simNao(v) { return v === 'SIM' ? 'Sim' : v === 'NAO' ? 'Não' : ''; }
+
+  /* --- geometria --- */
+  function noAnel(x, y, anel) {
+    var dentro = false;
+    for (var i = 0, j = anel.length - 1; i < anel.length; j = i++) {
+      var xi = anel[i][0], yi = anel[i][1], xj = anel[j][0], yj = anel[j][1];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) dentro = !dentro;
+    }
+    return dentro;
+  }
+  function naGeometria(lon, lat, g) {
+    if (!g) return false;
+    var polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
+    return polys.some(function (p) {
+      return noAnel(lon, lat, p[0]) && !p.slice(1).some(function (furo) { return noAnel(lon, lat, furo); });
+    });
+  }
+  function paraLatLngs(g) {
+    function anel(r) { return r.map(function (c) { return [c[1], c[0]]; }); }
+    if (g.type === 'Polygon') return g.coordinates.map(anel);
+    if (g.type === 'MultiPolygon') return g.coordinates.map(function (p) { return p.map(anel); });
+    return [];
+  }
+
+  /* --- armazenamento --- */
+  var LS = {
+    get: function (k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } },
+    set: function (k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* ignora */ } },
+    del: function (k) { try { localStorage.removeItem(k); } catch (e) { /* ignora */ } }
+  };
+  var IDB = {
+    db: null,
+    abrir: function () {
+      var self = this;
+      if (self.db) return Promise.resolve(self.db);
+      return new Promise(function (res, rej) {
+        var r = indexedDB.open('patrulha-rural', 1);
+        r.onupgradeneeded = function () { r.result.createObjectStore('kv'); };
+        r.onsuccess = function () { self.db = r.result; res(self.db); };
+        r.onerror = function () { rej(r.error); };
+      });
+    },
+    op: function (modo, fn) {
+      return this.abrir().then(function (db) {
+        return new Promise(function (res, rej) {
+          var tx = db.transaction('kv', modo);
+          var req = fn(tx.objectStore('kv'));
+          tx.oncomplete = function () { res(req && req.result); };
+          tx.onerror = function () { rej(tx.error); };
+        });
+      });
+    },
+    get: function (k) { return this.op('readonly', function (s) { return s.get(k); }); },
+    set: function (k, v) { return this.op('readwrite', function (s) { return s.put(v, k); }); },
+    del: function (k) { return this.op('readwrite', function (s) { return s.delete(k); }); },
+    chaves: function () { return this.op('readonly', function (s) { return s.getAllKeys(); }); },
+    limpar: function () { return this.op('readwrite', function (s) { return s.clear(); }); }
+  };
+
+  function api(acao, dados, tempo) {
+    if (!C.API_URL || C.API_URL.indexOf('COLE_AQUI') === 0) {
+      return Promise.reject(new Error('Endereço da API não configurado (config.js).'));
+    }
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, tempo || 120000);
+    return fetch(C.API_URL, {
+      method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(Object.assign({ acao: acao }, dados || {})), redirect: 'follow', signal: ctrl.signal
+    }).then(function (r) {
+      if (!r.ok) throw new Error('Falha de comunicação (' + r.status + ').');
+      return r.json();
+    }).then(function (j) {
+      if (!j.ok) { var e = new Error(j.erro || 'Erro no servidor.'); e.sessaoInvalida = !!j.sessaoInvalida; throw e; }
+      return j;
+    }).catch(function (e) {
+      if (e.name === 'AbortError') throw new Error('Tempo esgotado. Verifique o sinal.');
+      if (e instanceof TypeError) throw new Error('Sem conexão com o servidor.');
+      throw e;
+    }).finally(function () { clearTimeout(timer); });
+  }
+
+  /* ================================================================ */
+  /* Estado                                                            */
+  /* ================================================================ */
+  var CAMPO_VAZIO = function () {
+    return { enderecos: { cols: ['ID'], rows: [] }, propriedades: { cols: ['ID'], rows: [] },
+             vias: { cols: ['ID'], rows: [] }, pontos: { cols: ['ID'], rows: [] }, redes: { cols: ['ID'], rows: [] } };
+  };
+  var E = {
+    sessao: null,
+    municipios: [],          // [{cod, nome, v}]
+    bases: {},               // cod -> base
+    campo: CAMPO_VAZIO(),    // camadas de campo vindas da planilha (cols/rows)
+    fila: [],
+    ends: [], endPorId: {}, props: [], propPorId: {}, vias: [], viaPorId: {}, pontos: [],
+    mapa: null, render: null, g: {},
+    destaque: null, marcaLocal: null, enquadrado: false,
+    gps: { watch: null, seguir: false, pos: null, marcador: null, precisao: null },
+    prefs: Object.assign({ base: 'mapa', ocultas: [], ocultasSituacao: [], colorir: 'situacao', vias: true,
+                           pontos: true, props: true, ends: true, limites: true, redes: true }, LS.get('prefs') || {}),
+    sincronizando: false, enviando: false,
+    redes: [], redePorEnd: {}
+  };
+
+  /* ================================================================ */
+  /* Telas, login, senha                                               */
+  /* ================================================================ */
+  function mostrarTela(nome) {
+    ['login', 'senha', 'mapa'].forEach(function (t) { $('#tela-' + t).hidden = (t !== nome); });
+  }
+  function sessaoValida(s) { return !!(s && s.token && s.expira && new Date(s.expira) > new Date()); }
+
+  function iniciar() {
+    registrarServiceWorker();
+    var s = LS.get('sessao');
+    if (!sessaoValida(s)) { LS.del('sessao'); mostrarTela('login'); return; }
+    E.sessao = s;
+    if (s.trocarSenha) { mostrarTela('senha'); return; }
+    abrirMapa();
+  }
+
+  $('#form-login').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var btn = $('#btn-entrar'), erro = $('#login-erro');
+    erro.textContent = '';
+    btn.disabled = true; btn.textContent = 'Entrando…';
+    api('login', { usuario: $('#login-usuario').value.trim(), senha: $('#login-senha').value }).then(function (r) {
+      var anterior = LS.get('ultimoUsuario');
+      E.sessao = { token: r.token, expira: r.expira, usuario: r.usuario, trocarSenha: r.trocarSenha };
+      LS.set('sessao', E.sessao);
+      $('#login-senha').value = '';
+      var seguir = function () { if (r.trocarSenha) mostrarTela('senha'); else abrirMapa(); };
+      // outro militar no mesmo aparelho: não herda dados do anterior (só os envios pendentes, se houver)
+      if (anterior && anterior !== r.usuario.usuario) {
+        E.prefs.munSel = null; LS.set('prefs', E.prefs);
+        return IDB.get('fila').then(function (f) {
+          return IDB.limpar().then(function () { if (f && f.length) return IDB.set('fila', f); });
+        }).then(function () { LS.set('ultimoUsuario', r.usuario.usuario); seguir(); });
+      }
+      LS.set('ultimoUsuario', r.usuario.usuario);
+      seguir();
+    }).catch(function (e) { erro.textContent = e.message; })
+      .finally(function () { btn.disabled = false; btn.textContent = 'Entrar'; });
+  });
+
+  $('#form-senha').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var erro = $('#senha-erro');
+    erro.textContent = '';
+    var nova = $('#senha-nova').value;
+    if (nova !== $('#senha-nova2').value) { erro.textContent = 'As senhas não conferem.'; return; }
+    if (nova.length < 8) { erro.textContent = 'Use pelo menos 8 caracteres.'; return; }
+    var btn = ev.target.querySelector('button');
+    btn.disabled = true;
+    api('trocarSenha', { token: E.sessao.token, senhaAtual: $('#senha-atual').value, senhaNova: nova }).then(function () {
+      E.sessao.trocarSenha = false;
+      LS.set('sessao', E.sessao);
+      ev.target.reset();
+      abrirMapa();
+    }).catch(function (e) {
+      if (e.sessaoInvalida) return sessaoExpirou(e.message);
+      erro.textContent = e.message;
+    }).finally(function () { btn.disabled = false; });
+  });
+
+  function sessaoExpirou(msg) {
+    LS.del('sessao');
+    E.sessao = null;
+    LS.set('msgLogin', (msg || 'Sessão expirada.') +
+      (E.fila.length ? ' Seus ' + E.fila.length + ' envio(s) pendente(s) estão guardados.' : ''));
+    location.reload();
+  }
+  function sair() {
+    if (E.sessao) api('sair', { token: E.sessao.token }).catch(function () {});
+    LS.del('sessao'); LS.del('ultimoUsuario');
+    E.sessao = null;
+    IDB.limpar().catch(function () {}).then(function () { location.reload(); });
+  }
+
+  /* ================================================================ */
+  /* Abertura e sincronização                                         */
+  /* ================================================================ */
+  function abrirMapa() {
+    mostrarTela('mapa');
+    if (!E.mapa) criarMapa();
+    atualizarStatus();
+    IDB.del('dados').catch(function () {}); // cópia da versão 1, não é mais usada
+    Promise.all([IDB.get('municipios'), IDB.get('campo'), IDB.get('fila'), IDB.get('sincronizadoEm')]).then(function (r) {
+      E.municipios = r[0] || [];
+      E.campo = campoValido(r[1]);
+      E.fila = migrarFilaV1(Array.isArray(r[2]) ? r[2] : []);
+      E.sincronizadoEm = r[3] || null;
+      return Promise.all(E.municipios.map(function (m) {
+        return IDB.get('base_' + m.cod).then(function (b) { if (baseValida(b, m.cod)) E.bases[m.cod] = b; else if (b !== undefined) IDB.del('base_' + m.cod); });
+      }));
+    }).then(function () {
+      montar();
+      var horas = E.sincronizadoEm ? (Date.now() - new Date(E.sincronizadoEm).getTime()) / 3600000 : Infinity;
+      if (navigator.onLine && (horas >= (C.ATUALIZAR_APOS_HORAS || 12) || !Object.keys(E.bases).length)) {
+        sincronizar(Object.keys(E.bases).length > 0);
+      } else {
+        enviarFila();
+        if (!Object.keys(E.bases).length) toast('Sem dados no aparelho. Conecte-se à internet para baixar.', { duracao: 0 });
+        else if (!selecionados(E.municipios) && E.municipios.length) { /* escolha feita no próximo acesso com sinal */ }
+      }
+    }).catch(function (e) {
+      console.error(e);
+      if (navigator.onLine) sincronizar(false);
+    });
+  }
+
+  /** Envios pendentes feitos na versão 1 (só Poços de Caldas) viram envios da v2. */
+  function migrarFilaV1(fila) {
+    var mapa = { PROPRIEDADE_EDITAR: 'END_EDITAR', VISITA: 'END_VISITA', PROPRIEDADE_EXCLUIR: 'END_EXCLUIR', PROPRIEDADE_NOVA: 'END_NOVO' };
+    var mudou = false;
+    var nova = fila.map(function (it) {
+      if (!mapa[it.tipo]) return it;
+      mudou = true;
+      var n = Object.assign({}, it, { tipo: mapa[it.tipo] });
+      if (n.alvoId && /^CNEFE-\d+$/.test(n.alvoId)) n.alvoId = n.alvoId.replace(/^CNEFE-/, 'CNEFE-' + MUNICIPIO_V1 + '-');
+      if (n.tipo === 'END_NOVO') n.mun = MUNICIPIO_V1;
+      if (n.dados) {
+        var d = {};
+        if (n.dados.RESPONSAVEL !== undefined) d.MORADOR = n.dados.RESPONSAVEL;
+        ['CONTATO', 'PLACAS_VEICULOS', 'TEM_CAO', 'TEM_CAMERAS', 'COMO_CHEGAR', 'OBS_SEGURANCA', 'ESPECIE',
+         'LOCALIDADE', 'LOGRADOURO', 'NUMERO'].forEach(function (k) { if (n.dados[k] !== undefined) d[k] = n.dados[k]; });
+        n.dados = d;
+      }
+      return n;
+    }).filter(function (it) { return !(it.tipo === 'END_EDITAR' && !Object.keys(it.dados || {}).length && !it.novaPosicao && !it.registrarVisita); });
+    if (mudou) IDB.set('fila', nova);
+    return nova;
+  }
+
+  function sincronizar(silencioso) {
+    if (E.sincronizando || !E.sessao) return Promise.resolve();
+    if (!navigator.onLine) { toast('Sem sinal. Os dados serão atualizados quando houver internet.'); return Promise.resolve(); }
+    E.sincronizando = true;
+    atualizarStatus();
+    if (!silencioso) toast('Atualizando dados…', { duracao: 0 });
+    var baixadas = 0, semBase = [], escolher = false, falhas = [];
+    return enviarFila(true).then(function () {
+      return api('dados', { token: E.sessao.token });
+    }).then(function (r) {
+      if (r.usuario) { E.sessao.usuario = r.usuario; LS.set('sessao', E.sessao); }
+      var lista = r.municipios || [];
+      var sel = selecionados(lista);
+      if (!sel) escolher = true;   // área grande: o militar escolhe antes de baixar
+      var pendentes = lista.filter(function (m) {
+        if (!sel || !sel[m.cod]) return false;
+        if (!m.v) { semBase.push(m.nome); return false; }
+        return !E.bases[m.cod] || E.bases[m.cod].v !== m.v;
+      });
+      var cadeia = Promise.resolve();
+      pendentes.forEach(function (m, i) {
+        cadeia = cadeia.then(function () {
+          toast('Baixando ' + m.nome + ' (' + (i + 1) + ' de ' + pendentes.length + ')…', { duracao: 0 });
+          return api('base', { token: E.sessao.token, cod: m.cod }, 300000).then(function (rb) {
+            if (!baseValida(rb.base, m.cod)) { falhas.push(m.nome + ' (arquivo da base vazio ou inválido)'); return; }
+            E.bases[m.cod] = rb.base;
+            baixadas++;
+            return IDB.set('base_' + m.cod, rb.base);
+          }).catch(function (e) {
+            if (e.sessaoInvalida) throw e;
+            falhas.push(m.nome + ' (' + e.message + ')');   // segue com os demais municípios
+          });
+        });
+      });
+      return cadeia.then(function () {
+        // fora da área ou fora da seleção: apaga do aparelho
+        Object.keys(E.bases).forEach(function (cod) {
+          if (!sel || !sel[cod]) { delete E.bases[cod]; IDB.del('base_' + cod); }
+        });
+        E.municipios = lista;
+        E.campo = campoValido(r.campo);
+        E.fila.forEach(function (it) { aplicarItemLocal(it); });
+        E.sincronizadoEm = new Date().toISOString();
+        return Promise.all([IDB.set('municipios', lista), IDB.set('campo', E.campo), IDB.set('sincronizadoEm', E.sincronizadoEm)]);
+      });
+    }).then(function () {
+      montar();
+      if (escolher) { abrirEscolhaMunicipios(true); return; }
+      var msg = 'Dados atualizados: ' + Object.keys(E.bases).length + ' município(s) no aparelho' +
+        (baixadas ? ', ' + baixadas + ' base(s) baixada(s)' : '') + '.';
+      if (semBase.length) msg += ' Ainda sem base: ' + semBase.join(', ') + '.';
+      if (falhas.length) msg += ' NÃO baixados: ' + falhas.join('; ') + '.';
+      toast(msg, { duracao: semBase.length || falhas.length ? 12000 : 4000 });
+    }).catch(function (e) {
+      if (e.sessaoInvalida) return sessaoExpirou(e.message);
+      toast('Não foi possível atualizar: ' + e.message, { duracao: 7000 });
+      if (baixadas) montar();
+    }).finally(function () {
+      E.sincronizando = false;
+      atualizarStatus();
+    });
+  }
+
+  /** Municípios a manter no aparelho: {cod:true}, ou null se o militar ainda precisa escolher. */
+  function selecionados(lista) {
+    var area = {};
+    lista.forEach(function (m) { area[m.cod] = true; });
+    var sel = (E.prefs.munSel || []).filter(function (c) { return area[c]; });
+    if (!sel.length) {
+      // área pequena: baixa tudo (inclusive municípios novos); área grande: mantém o que já tem ou pede a escolha
+      var ja = Object.keys(E.bases).filter(function (c) { return area[c]; });
+      if (lista.length <= MUNICIPIOS_AUTO) sel = Object.keys(area);
+      else if (ja.length) sel = ja;
+      else return null;
+    }
+    var mapa = {};
+    sel.forEach(function (c) { mapa[c] = true; });
+    return mapa;
+  }
+
+  function abrirEscolhaMunicipios(primeiraVez) {
+    var atuais = {};
+    (E.prefs.munSel || []).forEach(function (c) { atuais[c] = true; });
+    if (!E.prefs.munSel) Object.keys(E.bases).forEach(function (c) { atuais[c] = true; });
+    var lista = E.municipios.slice().sort(function (a, b) { return a.nome.localeCompare(b.nome, 'pt-BR'); });
+    abrirPainel('<form data-form="municipios"><h2>Municípios neste aparelho</h2>' +
+      '<p class="dica">' + (primeiraVez ? 'Sua área tem ' + lista.length + ' municípios. ' : '') +
+      'Escolha os que você usa no serviço: só eles são baixados e ficam disponíveis sem sinal. Pode mudar depois pelo menu.</p>' +
+      '<div class="acoes"><button type="button" class="btn btn-secundario" data-marcar="todos">Marcar todos</button>' +
+      '<button type="button" class="btn btn-secundario" data-marcar="nenhum">Desmarcar todos</button></div>' +
+      '<div class="opcoes">' + lista.map(function (m) {
+        return '<label class="opcao opcao-form"><input type="checkbox" name="mun" value="' + esc(m.cod) + '"' + (atuais[m.cod] ? ' checked' : '') +
+          '><span>' + esc(m.nome) + (m.v ? '' : ' <small>(base ainda não gerada)</small>') + '</span></label>';
+      }).join('') + '</div><p class="erro" data-erro></p>' +
+      '<div class="acoes"><button type="submit" class="btn btn-primario largo">Salvar e baixar</button></div></form>', 'form-municipios');
+  }
+
+  /* ================================================================ */
+  /* Montagem: base do IBGE/CAR + camadas de campo                     */
+  /* ================================================================ */
+  /** Base de município utilizável (evita travar o app com arquivo vazio ou corrompido). */
+  function baseValida(b, cod) {
+    return !!(b && typeof b === 'object' && b.enderecos && Array.isArray(b.enderecos.rows) &&
+              b.propriedades && Array.isArray(b.propriedades.rows) && (!b.mun || String(b.mun) === String(cod)));
+  }
+  function campoValido(c) {
+    var v = CAMPO_VAZIO();
+    if (!c || typeof c !== 'object') return v;
+    Object.keys(v).forEach(function (k) { if (!c[k] || !Array.isArray(c[k].rows) || !Array.isArray(c[k].cols)) c[k] = v[k]; });
+    return c;
+  }
+  function objetos(tab) {
+    if (!tab || !tab.rows) return [];
+    return tab.rows.map(function (row) {
+      var o = {};
+      for (var i = 0; i < tab.cols.length; i++) o[tab.cols[i]] = row[i] === undefined || row[i] === null ? '' : row[i];
+      return o;
+    });
+  }
+  function porId(lista) { var m = {}; lista.forEach(function (o) { m[o.ID] = o; }); return m; }
+  function nomeMunicipio(cod) {
+    var m = E.municipios.filter(function (x) { return x.cod === cod; })[0];
+    return m ? m.nome : (E.bases[cod] ? E.bases[cod].nome : cod);
+  }
+
+  function fundirEnd(base, ov, mun) {
+    var d = Object.assign({}, base || {});
+    if (ov) Object.keys(ov).forEach(function (k) { if (ov[k] !== '' || k === 'STATUS') d[k] = ov[k]; });
+    var lat = numero(ov && ov.LATITUDE) !== null ? numero(ov.LATITUDE) : numero(base && base.LAT);
+    var lon = numero(ov && ov.LONGITUDE) !== null ? numero(ov.LONGITUDE) : numero(base && base.LON);
+    if (lat === null || lon === null) return null;
+    var e = { tipo: 'END', id: d.ID, mun: (ov && ov.COD_MUNICIPIO) || mun, lat: lat, lon: lon, d: d, base: base || null,
+              especie: d.ESPECIE || 'Domicílio particular', validado: String(d.STATUS).toUpperCase() === 'VALIDADO',
+              excluido: String(d.STATUS).toUpperCase() === 'EXCLUIDO',
+              idProp: (ov && ov.ID_PROPRIEDADE) || (base && base.ID_PROP) || '' };
+    e.endereco = d.LOGRADOURO ? d.LOGRADOURO + (d.NUMERO && d.NUMERO !== 'SN' ? ', ' + d.NUMERO : (d.NUMERO === 'SN' ? ', s/nº' : '')) : '';
+    e.subtitulo = [e.endereco, d.LOCALIDADE].filter(Boolean).join(' · ');
+    e.titulo = d.MORADOR || d.NOME_ESTABELECIMENTO || d.NOME_LOCAL || e.especie;
+    e.busca = normalizar([d.MORADOR, d.NOME_ESTABELECIMENTO, d.NOME_LOCAL, d.LOGRADOURO, d.NUMERO, d.LOCALIDADE, d.CEP, e.especie,
+                          d.PLACAS_VEICULOS, String(d.PLACAS_VEICULOS || '').replace(/[\s,]/g, ''), nomeMunicipio(e.mun)].join(' '));
+    return e;
+  }
+
+  function fundirProp(base, ov, mun) {
+    var d = Object.assign({}, base || {});
+    if (ov) Object.keys(ov).forEach(function (k) { if (ov[k] !== '' || k === 'STATUS') d[k] = ov[k]; });
+    var sedeLat = numero(ov && ov.LATITUDE), sedeLon = numero(ov && ov.LONGITUDE);
+    var lat = sedeLat !== null ? sedeLat : numero(base && base.LAT);
+    var lon = sedeLon !== null ? sedeLon : numero(base && base.LON);
+    if (lat === null || lon === null) return null;
+    var p = { tipo: 'PROP', id: d.ID, mun: (ov && ov.COD_MUNICIPIO) || mun, lat: lat, lon: lon, d: d, base: base || null,
+              geom: base && base.GEOM ? base.GEOM : null, bbox: base && base.BBOX ? base.BBOX : null,
+              sedeMarcada: sedeLat !== null, validado: String(d.STATUS).toUpperCase() === 'VALIDADO',
+              excluido: String(d.STATUS).toUpperCase() === 'EXCLUIDO', ends: [] };
+    p.titulo = d.NOME_PROPRIEDADE || (d.TIPO_PROPRIEDADE ? d.TIPO_PROPRIEDADE + ' sem nome' : 'Imóvel rural' +
+               (base && base.AREA_HA ? ' · ' + fmtArea(base.AREA_HA) : ''));
+    p.busca = normalizar([d.NOME_PROPRIEDADE, d.TIPO_PROPRIEDADE, d.PROPRIETARIO, d.CASEIRO, d.CULTURAS, d.ATIVIDADES,
+                          d.PLACAS_VEICULOS, String(d.PLACAS_VEICULOS || '').replace(/[\s,]/g, ''), d.COD_CAR,
+                          'imovel rural propriedade', nomeMunicipio(p.mun)].join(' '));
+    return p;
+  }
+  /** Título do endereço: morador/responsável; sem ele, a propriedade (se for a sede dela); senão o tipo. */
+  function ajustarTituloEnd(e) {
+    var d = e.d, p = E.propPorId[e.idProp];
+    e.ehSede = !!(p && p.d.SEDE_ENDERECO === e.id);
+    if (d.MORADOR || d.NOME_ESTABELECIMENTO) return;
+    if (e.ehSede) e.titulo = 'Sede · ' + (p.d.NOME_PROPRIEDADE || p.d.PROPRIETARIO || p.titulo);
+    else e.titulo = d.NOME_LOCAL || e.especie;
+  }
+  function fmtArea(ha) { ha = Number(ha) || 0; return (ha < 10 ? ha.toFixed(1) : Math.round(ha)).toString().replace('.', ',') + ' ha'; }
+
+  function montar() {
+    var ovEnd = porId(objetos(E.campo.enderecos)), ovProp = porId(objetos(E.campo.propriedades));
+    var ovVia = porId(objetos(E.campo.vias));
+    var usadosEnd = {}, usadosProp = {};
+    E.ends = []; E.props = []; E.vias = []; E.endPorId = {}; E.propPorId = {}; E.viaPorId = {}; E.redes = []; E.redePorEnd = {};
+
+    Object.keys(E.bases).forEach(function (cod) {
+      var b = E.bases[cod];
+      if (!baseValida(b, cod)) { delete E.bases[cod]; return; }
+      objetos(b.propriedades).forEach(function (o) {
+        var p = fundirProp(o, ovProp[o.ID], cod);
+        usadosProp[o.ID] = true;
+        if (p && !p.excluido) { E.props.push(p); E.propPorId[p.id] = p; }
+      });
+      objetos(b.enderecos).forEach(function (o) {
+        var e = fundirEnd(o, ovEnd[o.ID], cod);
+        usadosEnd[o.ID] = true;
+        if (e && !e.excluido) { E.ends.push(e); E.endPorId[e.id] = e; }
+      });
+      objetos(b.vias).forEach(function (o) {
+        var v = { tipo: 'VIA', id: o.ID, mun: cod, coords: o.GEOM, m: o.M, d: Object.assign({}, ovVia[o.ID] || {}) };
+        E.vias.push(v); E.viaPorId[v.id] = v;
+      });
+    });
+    // criados em campo (não existem na base)
+    Object.keys(ovProp).forEach(function (id) {
+      var o = ovProp[id];
+      if (usadosProp[id] || !E.bases[o.COD_MUNICIPIO]) return;
+      var p = fundirProp(null, o, o.COD_MUNICIPIO);
+      if (p && !p.excluido) { E.props.push(p); E.propPorId[p.id] = p; }
+    });
+    Object.keys(ovEnd).forEach(function (id) {
+      var o = ovEnd[id];
+      if (usadosEnd[id] || !E.bases[o.COD_MUNICIPIO]) return;
+      var e = fundirEnd(null, o, o.COD_MUNICIPIO);
+      if (e && !e.excluido) { E.ends.push(e); E.endPorId[e.id] = e; }
+    });
+    E.ends.forEach(function (e) { var p = E.propPorId[e.idProp]; if (p) p.ends.push(e); });
+    E.ends.forEach(ajustarTituloEnd);
+    E.pontos = objetos(E.campo.pontos).filter(function (o) {
+      return String(o.STATUS).toUpperCase() !== 'REMOVIDO' && E.bases[o.COD_MUNICIPIO];
+    }).map(function (o) { return { tipo: 'PONTO', id: o.ID, mun: o.COD_MUNICIPIO, lat: numero(o.LATITUDE), lon: numero(o.LONGITUDE), d: o }; })
+      .filter(function (p) { return p.lat !== null && p.lon !== null; });
+
+    montarRedes();
+    desenharTudo();
+    atualizarStatus();
+  }
+
+  /* ================================================================ */
+  /* Mapa e camadas                                                    */
+  /* ================================================================ */
+  function criarMapa() {
+    E.render = L.canvas({ padding: 0.5, tolerance: 6 });
+    E.mapa = L.map('mapa', { zoomControl: false, preferCanvas: true, renderer: E.render,
+                             center: C.CENTRO || [-21.7878, -46.5613], zoom: C.ZOOM || 10, maxZoom: 20 });
+    E.bases_ = {
+      mapa: L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 20, maxNativeZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' }),
+      satelite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        { maxZoom: 20, maxNativeZoom: 18, attribution: 'Imagens &copy; Esri' })
+    };
+    trocarBase(E.prefs.base);
+    E.mapa.attributionControl.setPrefix(false);
+    ['limites', 'redes', 'props', 'vias', 'ends', 'pontos', 'sugest'].forEach(function (k) { E.g[k] = L.layerGroup(); });
+    E.mapa.on('zoomend', function () { ajustarRaios(); E.mapa.getContainer().classList.toggle('mapa-longe', E.mapa.getZoom() < 13); });
+    E.mapa.on('moveend', function () { atualizarVisiveis(); atualizarPoligonos(); atualizarDica(); });
+    E.mapa.on('click', function () { fecharPainel(); });
+    E.mapa.on('contextmenu', function (ev) { abrirAdicionar(ev.latlng); });
+    E.mapa.on('dragstart', function () { if (E.gps.seguir) { E.gps.seguir = false; atualizarBotaoGps(); } });
+  }
+  function trocarBase(nome) {
+    Object.keys(E.bases_).forEach(function (k) { E.mapa.removeLayer(E.bases_[k]); });
+    if (E.bases_[nome]) E.bases_[nome].addTo(E.mapa).bringToBack();
+    E.baseAtual = nome; E.prefs.base = nome; LS.set('prefs', E.prefs);
+  }
+  function raioAtual() { var z = E.mapa.getZoom(); return z < 12 ? 3.5 : z < 14 ? 5 : z < 16 ? 7 : 9; }
+  function ajustarRaios() {
+    var r = raioAtual();
+    var lista = E.modoLeve ? Object.keys(E.visiveis.ends).map(function (id) { return E.visiveis.ends[id]; }) : E.ends;
+    lista.forEach(function (e) { if (e.marcador) e.marcador.setRadius(e.validado ? r + 1 : r); });
+  }
+  function camadaLigada(nome) { return E.prefs[nome] !== false; }
+  function ligarCamada(nome, sim) {
+    E.prefs[nome] = sim; LS.set('prefs', E.prefs);
+    if (sim) E.g[nome].addTo(E.mapa); else E.mapa.removeLayer(E.g[nome]);
+    if (nome === 'props') atualizarPoligonos();
+    atualizarDica();
+  }
+
+  /* --- criação preguiçosa dos desenhos --- */
+  function marcadorEnd(e) {
+    if (!e.marcador) {
+      e.marcador = L.circleMarker([e.lat, e.lon], estiloEnd(e, raioAtual())).on('click', function (ev) {
+        L.DomEvent.stopPropagation(ev); abrirFichaEnd(e);
+      });
+    }
+    return e.marcador;
+  }
+  function linhaVia(v) {
+    if (!v.linha) {
+      v.linha = L.polyline(v.latlngs, estiloVia(v)).on('click', function (ev) { L.DomEvent.stopPropagation(ev); abrirFichaVia(v); });
+    }
+    return v.linha;
+  }
+
+  /* --- grade espacial (modo leve) --- */
+  function celulas(x0, y0, x1, y1) {
+    var out = [];
+    for (var i = Math.floor(x0 / CELULA); i <= Math.floor(x1 / CELULA); i++)
+      for (var j = Math.floor(y0 / CELULA); j <= Math.floor(y1 / CELULA); j++) out.push(i + ':' + j);
+    return out;
+  }
+  function gradeAdd(grade, x, bb) {
+    celulas(bb[0], bb[1], bb[2], bb[3]).forEach(function (c) { (grade[c] || (grade[c] = [])).push(x); });
+  }
+  function gradeDel(grade, x, bb) {
+    celulas(bb[0], bb[1], bb[2], bb[3]).forEach(function (c) {
+      if (grade[c]) grade[c] = grade[c].filter(function (y) { return y !== x; });
+    });
+  }
+  function bbVia(v) {
+    var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    v.coords.forEach(function (c) { if (c[0] < x0) x0 = c[0]; if (c[0] > x1) x1 = c[0]; if (c[1] < y0) y0 = c[1]; if (c[1] > y1) y1 = c[1]; });
+    return [x0, y0, x1, y1];
+  }
+
+  /** Modo leve: desenha só os endereços e vias que estão na tela. */
+  function atualizarVisiveis(forcar) {
+    if (!E.mapa || !E.modoLeve || !E.visiveis) return;
+    var querer = { ends: {}, vias: {} };
+    if (E.mapa.getZoom() >= ZOOM_DETALHE) {
+      var b = E.mapa.getBounds().pad(0.3);
+      celulas(b.getWest(), b.getSouth(), b.getEast(), b.getNorth()).forEach(function (c) {
+        (E.grade.ends[c] || []).forEach(function (e) { if (passaFiltro(e)) querer.ends[e.id] = e; });
+        (E.grade.vias[c] || []).forEach(function (v) { querer.vias[v.id] = v; });
+      });
+    }
+    [['ends', marcadorEnd, 'marcador'], ['vias', linhaVia, 'linha']].forEach(function (cfg) {
+      var nome = cfg[0], atual = E.visiveis[nome], quer = querer[nome];
+      Object.keys(atual).forEach(function (id) {
+        if (!quer[id] || quer[id] !== atual[id] || forcar === true) { E.g[nome].removeLayer(atual[id][cfg[2]]); delete atual[id]; }
+      });
+      Object.keys(quer).forEach(function (id) {
+        if (atual[id]) return;
+        E.g[nome].addLayer(cfg[1](quer[id]));
+        atual[id] = quer[id];
+      });
+    });
+    atualizarDica();
+  }
+
+  function atualizarDica() {
+    var dica = $('#dica-zoom');
+    if (!dica || !E.mapa) return;
+    var z = E.mapa.getZoom();
+    var temPol = camadaLigada('props') && E.props.some(function (p) { return p.geom; });
+    var txt = '';
+    if (E.modoLeve && z < ZOOM_DETALHE) txt = 'Aproxime o mapa para ver endereços, vias e propriedades';
+    else if (temPol && z < ZOOM_POLIGONOS) txt = 'Aproxime o mapa para ver os limites das propriedades';
+    dica.textContent = txt;
+    dica.hidden = !txt;
+  }
+
+  function corEnd(e) {
+    if (E.prefs.colorir === 'tipo') return CORES_ESPECIE[e.especie] || COR_PADRAO;
+    return e.validado ? COR_SITUACAO.VALIDADO : COR_SITUACAO.NAO_VALIDADO;
+  }
+  function estiloEnd(e, raio) {
+    var sit = E.prefs.colorir !== 'tipo';
+    return { renderer: E.render, radius: e.validado ? raio + 1 : raio, color: sit && e.validado ? '#0b3d1f' : '#ffffff',
+             weight: sit && e.validado ? 2 : 1.5, fillColor: corEnd(e), fillOpacity: 1 };
+  }
+  function estiloProp(p) {
+    var c = p.validado ? COR_PROP.VALIDADO : COR_PROP.NAO_VALIDADO;
+    return { renderer: E.render, color: c, weight: p.validado ? 2.5 : 1.5, opacity: 0.95,
+             fillColor: c, fillOpacity: p.validado ? 0.14 : 0.05 };
+  }
+  function marcadorSede(p) {
+    var c = p.validado ? COR_PROP.VALIDADO : COR_PROP.NAO_VALIDADO;
+    return L.marker([p.lat, p.lon], {
+      icon: L.divIcon({ className: '', iconSize: [18, 18], iconAnchor: [9, 9],
+                        html: '<div class="marca-prop" style="background:' + c + '"></div>' }), keyboard: false
+    }).on('click', function (ev) { L.DomEvent.stopPropagation(ev); abrirFichaProp(p); });
+  }
+
+  function desenharTudo() {
+    Object.keys(E.g).forEach(function (k) { E.g[k].clearLayers(); });
+    E.polVisiveis = {};
+    E.visiveis = { ends: {}, vias: {} };
+    E.grade = { ends: {}, vias: {} };
+    E.modoLeve = E.ends.length + E.vias.length > LIMITE_LEVE;
+    // limites dos municípios
+    Object.keys(E.bases).forEach(function (cod) {
+      var b = E.bases[cod];
+      if (b.limite) E.g.limites.addLayer(L.polygon(paraLatLngs(b.limite), {
+        renderer: E.render, fill: false, color: '#1f3d2b', weight: 2, opacity: 0.7, dashArray: '8 6', interactive: false
+      }));
+    });
+    // vias
+    E.vias.forEach(function (v) {
+      if (!v.coords || v.coords.length < 2) return;
+      v.latlngs = v.coords.map(function (c) { return [c[1], c[0]]; });
+      if (E.modoLeve) gradeAdd(E.grade.vias, v, bbVia(v));
+      else E.g.vias.addLayer(linhaVia(v));
+    });
+    // propriedades: sede (só as sem polígono) - polígonos entram por enquadramento
+    E.props.forEach(function (p) { if (!p.geom) { p.sede = marcadorSede(p); E.g.props.addLayer(p.sede); } });
+    // endereços
+    if (E.modoLeve) E.ends.forEach(function (e) { gradeAdd(E.grade.ends, e, [e.lon, e.lat, e.lon, e.lat]); });
+    aplicarVisibilidade();
+    desenharPontos();
+    desenharRedes();
+    ['limites', 'redes', 'props', 'vias', 'ends', 'pontos'].forEach(function (k) {
+      if (camadaLigada(k)) E.g[k].addTo(E.mapa); else E.mapa.removeLayer(E.g[k]);
+    });
+    E.g.sugest.addTo(E.mapa);
+    if (!E.enquadrado && Object.keys(E.bases).length) {
+      var b = L.latLngBounds([]);
+      E.g.limites.eachLayer(function (l) { b.extend(l.getBounds()); });
+      if (b.isValid()) E.mapa.fitBounds(b, { padding: [20, 20] });
+      E.enquadrado = true;
+    }
+    if (SUG.lista.length) desenharSugestoes();
+    atualizarPoligonos();
+    atualizarDica();
+  }
+
+  function estiloVia(v) {
+    var validada = String(v.d.STATUS).toUpperCase() === 'VALIDADO';
+    var intrans = /Intransit/.test(v.d.TRAFEGAVEL_VIATURA);
+    return { renderer: E.render, color: intrans ? '#c62828' : COR_VIA, weight: validada ? 4 : 3, opacity: 0.95,
+             dashArray: validada ? null : '7 6' };
+  }
+
+  function passaFiltro(x) {
+    var sit = x.validado ? 'VALIDADO' : 'NAO_VALIDADO';
+    if (E.prefs.ocultasSituacao.indexOf(sit) !== -1) return false;
+    if (x.tipo === 'END' && E.prefs.ocultas.indexOf(x.especie) !== -1) return false;
+    return true;
+  }
+  function aplicarVisibilidade() {
+    if (E.modoLeve) atualizarVisiveis(true);
+    else E.ends.forEach(function (e) {
+      var m = marcadorEnd(e), ver = passaFiltro(e), esta = E.g.ends.hasLayer(m);
+      if (ver && !esta) E.g.ends.addLayer(m); else if (!ver && esta) E.g.ends.removeLayer(m);
+    });
+    E.props.forEach(function (p) {
+      if (!p.sede) return;
+      var ver = passaFiltro(p), esta = E.g.props.hasLayer(p.sede);
+      if (ver && !esta) E.g.props.addLayer(p.sede); else if (!ver && esta) E.g.props.removeLayer(p.sede);
+    });
+    atualizarPoligonos(true);
+  }
+
+  /** Polígonos do CAR: só a partir de um zoom e só os que estão na tela (desempenho). */
+  function atualizarPoligonos(forcar) {
+    if (!E.mapa || !E.polVisiveis) return;
+    var ligado = camadaLigada('props') && E.props.some(function (p) { return p.geom; });
+    var perto = E.mapa.getZoom() >= ZOOM_POLIGONOS;
+    var querer = {};
+    if (ligado && perto) {
+      var b = E.mapa.getBounds().pad(0.25);
+      var x0 = b.getWest(), x1 = b.getEast(), y0 = b.getSouth(), y1 = b.getNorth(), n = 0;
+      for (var i = 0; i < E.props.length && n < MAX_POLIGONOS; i++) {
+        var p = E.props[i];
+        if (!p.geom || !passaFiltro(p)) continue;
+        var bb = p.bbox;
+        if (bb && (bb[2] < x0 || bb[0] > x1 || bb[3] < y0 || bb[1] > y1)) continue;
+        querer[p.id] = p; n++;
+      }
+    }
+    Object.keys(E.polVisiveis).forEach(function (id) {
+      if (!querer[id] || forcar === true) { E.g.props.removeLayer(E.polVisiveis[id].pol); delete E.polVisiveis[id]; }
+    });
+    Object.keys(querer).forEach(function (id) {
+      if (E.polVisiveis[id]) return;
+      var p = querer[id];
+      if (!p.pol) {
+        p.pol = L.polygon(paraLatLngs(p.geom), estiloProp(p)).on('click', function (ev) {
+          L.DomEvent.stopPropagation(ev); abrirFichaProp(p);
+        });
+      }
+      E.g.props.addLayer(p.pol);
+      p.pol.bringToBack(); // fica por baixo dos endereços e vias (que continuam clicáveis)
+      E.polVisiveis[id] = p;
+    });
+  }
+
+  function desenharPontos() {
+    E.g.pontos.clearLayers();
+    E.pontos.forEach(function (pt) {
+      var est = ESTILO_PONTO[pt.d.TIPO] || ESTILO_PONTO.Outro;
+      pt.marcador = L.marker([pt.lat, pt.lon], {
+        icon: L.divIcon({ className: '', iconSize: [24, 24], iconAnchor: [12, 12],
+                          html: '<div class="marca-ponto" style="background:' + est[0] + '">' + esc(est[1]) + '</div>' }),
+        keyboard: false
+      }).on('click', function (ev) { L.DomEvent.stopPropagation(ev); abrirFichaPonto(pt); });
+      E.g.pontos.addLayer(pt.marcador);
+    });
+  }
+
+  /** Atualiza só o registro alterado (sem redesenhar milhares de pontos). */
+  function refazer(tipo, id) {
+    refazer_(tipo, id);
+    if (tipo === 'PROP' && E.propPorId[id]) E.propPorId[id].ends.forEach(ajustarTituloEnd);
+  }
+  function refazer_(tipo, id) {
+    var ov, base, novo, velho;
+    if (tipo === 'END') {
+      velho = E.endPorId[id];
+      ov = porId(objetos(E.campo.enderecos))[id];
+      base = velho ? velho.base : null;
+      novo = fundirEnd(base, ov, velho ? velho.mun : ov && ov.COD_MUNICIPIO);
+      if (velho) {
+        if (velho.marcador) E.g.ends.removeLayer(velho.marcador);
+        if (E.modoLeve) { gradeDel(E.grade.ends, velho, [velho.lon, velho.lat, velho.lon, velho.lat]); delete E.visiveis.ends[id]; }
+        E.ends.splice(E.ends.indexOf(velho), 1);
+        delete E.endPorId[id];
+        var pv = E.propPorId[velho.idProp];
+        if (pv) pv.ends = pv.ends.filter(function (x) { return x.id !== id; });
+      }
+      if (novo && !novo.excluido) {
+        if (E.modoLeve) gradeAdd(E.grade.ends, novo, [novo.lon, novo.lat, novo.lon, novo.lat]);
+        E.ends.push(novo); E.endPorId[id] = novo;
+        var pn = E.propPorId[novo.idProp];
+        if (pn) pn.ends.push(novo);
+        ajustarTituloEnd(novo);
+      }
+    } else if (tipo === 'PROP') {
+      velho = E.propPorId[id];
+      ov = porId(objetos(E.campo.propriedades))[id];
+      novo = fundirProp(velho ? velho.base : null, ov, velho ? velho.mun : ov && ov.COD_MUNICIPIO);
+      if (velho) {
+        if (velho.sede) E.g.props.removeLayer(velho.sede);
+        if (velho.pol) E.g.props.removeLayer(velho.pol);
+        delete E.polVisiveis[id];
+        E.props.splice(E.props.indexOf(velho), 1);
+        delete E.propPorId[id];
+      }
+      if (novo && !novo.excluido) {
+        novo.ends = velho ? velho.ends : [];
+        if (!novo.geom) novo.sede = marcadorSede(novo);
+        E.props.push(novo); E.propPorId[id] = novo;
+      }
+    } else if (tipo === 'VIA') {
+      var v = E.viaPorId[id];
+      if (v) { v.d = Object.assign({}, porId(objetos(E.campo.vias))[id] || {}); if (v.linha) v.linha.setStyle(estiloVia(v)); }
+    } else if (tipo === 'PONTO') {
+      E.pontos = objetos(E.campo.pontos).filter(function (o) { return String(o.STATUS).toUpperCase() !== 'REMOVIDO'; })
+        .map(function (o) { return { tipo: 'PONTO', id: o.ID, mun: o.COD_MUNICIPIO, lat: numero(o.LATITUDE), lon: numero(o.LONGITUDE), d: o }; })
+        .filter(function (p) { return p.lat !== null && p.lon !== null; });
+      desenharPontos();
+    }
+    aplicarVisibilidade();
+  }
+
+  /* ================================================================ */
+  /* Fila de envios (funciona sem sinal)                               */
+  /* ================================================================ */
+  function registrar(item, extras) {
+    extras = (Array.isArray(extras) ? extras : [extras]).filter(Boolean);
+    item.uid = item.uid || novoUid();
+    item.feitoEm = new Date().toISOString();
+    if (E.gps.pos) item.posicao = { lat: E.gps.pos.lat, lon: E.gps.pos.lon, precisao: E.gps.pos.precisao };
+    E.fila.push(item);
+    var alvo = aplicarItemLocal(item), outros = [];
+    extras.forEach(function (extra) {   // envios complementares do mesmo atendimento (rede, sede da propriedade)
+      extra.uid = novoUid(); extra.feitoEm = item.feitoEm; extra.posicao = item.posicao;
+      if (!extra.alvoId && alvo) extra.alvoId = alvo.id;
+      E.fila.push(extra);
+      var a = aplicarItemLocal(extra);
+      if (a && (!alvo || a.id !== alvo.id || a.tipo !== alvo.tipo)) outros.push(a);
+    });
+    if ([item].concat(extras).some(function (x) { return x.tipo === 'REDE_CONTATO'; })) {
+      E.redePorEnd = {}; montarRedes(); E.g.redes.clearLayers(); desenharRedes();
+    }
+    outros.forEach(function (a) { refazer(a.tipo, a.id); });
+    if (alvo) refazer(alvo.tipo, alvo.id);
+    return Promise.all([IDB.set('fila', E.fila), IDB.set('campo', E.campo)]).then(function () {
+      atualizarStatus();
+      toast(navigator.onLine ? 'Salvo. Enviando…' : 'Salvo no aparelho. Será enviado quando houver sinal.');
+      enviarFila();
+      return alvo;
+    });
+  }
+
+  function enviarFila(silencioso) {
+    if (E.enviando || !E.fila.length || !navigator.onLine || !E.sessao) return Promise.resolve();
+    E.enviando = true;
+    atualizarStatus();
+    var lote = E.fila.slice(0, 100);
+    return api('enviar', { token: E.sessao.token, itens: lote }).then(function (r) {
+      var porUid = {};
+      (r.resultados || []).forEach(function (x) { porUid[x.uid] = x; });
+      var recusados = [], antes = E.fila.length;
+      E.fila = E.fila.filter(function (it) {
+        var x = porUid[it.uid];
+        if (!x) return true;
+        if (x.ok) return false;
+        if (x.definitivo) { recusados.push(x.erro); return false; }
+        return true;
+      });
+      var enviados = antes - E.fila.length - recusados.length;
+      return IDB.set('fila', E.fila).then(function () {
+        atualizarSelosPendentes();
+        if (recusados.length) toast('Um envio não foi aceito: ' + recusados[0], { duracao: 9000 });
+        else if (enviados > 0 && !silencioso) toast(enviados === 1 ? 'Enviado para a base.' : enviados + ' envios gravados na base.');
+        if (E.fila.length && enviados > 0) { E.enviando = false; return enviarFila(silencioso); }
+      });
+    }).catch(function (e) {
+      if (e.sessaoInvalida) return sessaoExpirou(e.message);
+      if (!silencioso) toast('Envio adiado: ' + e.message, { duracao: 5000 });
+    }).finally(function () { E.enviando = false; atualizarStatus(); });
+  }
+  window.addEventListener('online', function () { atualizarStatus(); enviarFila(); });
+  window.addEventListener('offline', function () { atualizarStatus(); });
+  setInterval(function () { enviarFila(true); }, 60000);
+
+  /** Aplica o envio na cópia local das camadas de campo. Devolve {tipo, id} do registro afetado. */
+  function aplicarItemLocal(it) {
+    var u = (E.sessao && E.sessao.usuario && E.sessao.usuario.usuario) || '';
+    var autoria = { ATUALIZADO_EM: it.feitoEm, ATUALIZADO_POR: u };
+    var visita = { DATA_ULTIMA_VISITA: it.feitoEm, ULTIMA_VISITA_POR: u };
+    function tabela(nome) { return E.campo[nome] || (E.campo[nome] = { cols: ['ID'], rows: [] }); }
+    function col(t, c) {
+      var i = t.cols.indexOf(c);
+      if (i === -1) { t.cols.push(c); t.rows.forEach(function (r) { r.push(''); }); i = t.cols.length - 1; }
+      return i;
+    }
+    function linha(t, id, mun, origem) {
+      var iId = col(t, 'ID');
+      for (var k = 0; k < t.rows.length; k++) if (t.rows[k][iId] === id) return t.rows[k];
+      var r = t.cols.map(function () { return ''; });
+      r[iId] = id;
+      t.rows.push(r);
+      setar(t, r, { COD_MUNICIPIO: mun || '', ORIGEM: origem || '' });
+      return r;
+    }
+    function setar(t, r, v) { Object.keys(v).forEach(function (c) { r[col(t, c)] = v[c] == null ? '' : v[c]; }); }
+    function munDe(id) {
+      var m = /^CNEFE-(\d{7})-/.exec(id) || /^CAR-[A-Z]{2}-(\d{7})-/.exec(id) || /^IBGE-(\d{7})-/.exec(id);
+      return m ? m[1] : '';
+    }
+    function origemDe(id) { return /^CNEFE-/.test(id) ? 'CNEFE' : /^CAR-/.test(id) ? 'CAR' : ''; }
+    var ehEnd = /^END_/.test(it.tipo), t = tabela(ehEnd ? 'enderecos' : 'propriedades');
+    var tipoAlvo = ehEnd ? 'END' : 'PROP', r, id;
+
+    switch (it.tipo) {
+      case 'END_EDITAR': case 'PROP_EDITAR':
+        r = linha(t, it.alvoId, munDe(it.alvoId), origemDe(it.alvoId));
+        setar(t, r, Object.assign({}, it.dados, { STATUS: 'VALIDADO' }, autoria, it.registrarVisita ? visita : {}));
+        if (it.novaPosicao) setar(t, r, { LATITUDE: it.novaPosicao.lat.toFixed(6), LONGITUDE: it.novaPosicao.lon.toFixed(6),
+                                          PRECISAO_COORD: 'GPS_CAMPO ±' + Math.round(it.novaPosicao.precisao) + 'm' });
+        return { tipo: tipoAlvo, id: it.alvoId };
+      case 'END_VISITA': case 'PROP_VISITA':
+        r = linha(t, it.alvoId, munDe(it.alvoId), origemDe(it.alvoId));
+        setar(t, r, Object.assign({}, visita, autoria));
+        return { tipo: tipoAlvo, id: it.alvoId };
+      case 'END_EXCLUIR': case 'PROP_EXCLUIR':
+        r = linha(t, it.alvoId, munDe(it.alvoId), origemDe(it.alvoId));
+        setar(t, r, Object.assign({ STATUS: 'EXCLUIDO' }, autoria));
+        return { tipo: tipoAlvo, id: it.alvoId };
+      case 'END_NOVO': case 'PROP_NOVA':
+        id = (ehEnd ? 'CAMPO-' : 'PR-') + uidCurto(it.uid);
+        r = linha(t, id, it.mun, 'CAMPO');
+        setar(t, r, Object.assign({ LATITUDE: it.novaPosicao.lat.toFixed(6), LONGITUDE: it.novaPosicao.lon.toFixed(6),
+          STATUS: 'VALIDADO', ID_PROPRIEDADE: it.idPropriedade || '' }, ehEnd ? { ESPECIE: 'Domicílio particular' } : {},
+          it.dados, autoria, it.registrarVisita ? visita : {}));
+        return { tipo: tipoAlvo, id: id };
+      case 'VIA_VALIDAR':
+        t = tabela('vias');
+        r = linha(t, it.alvoId, munDe(it.alvoId));
+        setar(t, r, Object.assign({}, it.dados, { STATUS: 'VALIDADO' }, autoria));
+        return { tipo: 'VIA', id: it.alvoId };
+      case 'PONTO_NOVO':
+        t = tabela('pontos');
+        id = 'PI-' + uidCurto(it.uid);
+        r = linha(t, id, it.mun);
+        setar(t, r, Object.assign({ LATITUDE: it.novaPosicao.lat.toFixed(6), LONGITUDE: it.novaPosicao.lon.toFixed(6), STATUS: 'ATIVO' },
+                                  it.dados, autoria));
+        return { tipo: 'PONTO', id: id };
+      case 'PROP_SEDE':
+        t = tabela('propriedades');
+        r = linha(t, it.alvoId, munDe(it.alvoId), origemDe(it.alvoId));
+        if (it.remover) {
+          if (r[col(t, 'SEDE_ENDERECO')] === it.enderecoId) setar(t, r, Object.assign({ SEDE_ENDERECO: '' },
+            /^CAR-/.test(it.alvoId) ? { LATITUDE: '', LONGITUDE: '', PRECISAO_COORD: '' } : {}));
+        } else setar(t, r, { SEDE_ENDERECO: it.enderecoId, LATITUDE: Number(it.lat).toFixed(6), LONGITUDE: Number(it.lon).toFixed(6), PRECISAO_COORD: 'SEDE_NO_ENDERECO' });
+        setar(t, r, autoria);
+        return { tipo: 'PROP', id: it.alvoId };
+      case 'REDE_CONTATO':
+        t = tabela(it.alvoTipo === 'END' ? 'enderecos' : 'propriedades');
+        r = linha(t, it.alvoId, munDe(it.alvoId), origemDe(it.alvoId));
+        setar(t, r, Object.assign({ REDE_ID: it.redeId, REDE_ADESAO: it.adesao, REDE_NO_GRUPO: it.noGrupo || '' },
+          it.ciencia && it.adesao !== 'NAO_FOI_POSSIVEL' ? { REDE_CIENCIA_EM: it.feitoEm, REDE_CIENCIA_POR: u } : {}, autoria));
+        var tr = tabela('redes'), lr = null, iIdR = col(tr, 'ID');
+        tr.rows.forEach(function (x) { if (x[iIdR] === it.redeId) lr = x; });
+        if (lr) {
+          var mem = String(lr[col(tr, 'ENDERECOS')] || '').split(';').filter(Boolean);
+          if (it.alvoTipo === 'END' && it.adesao === 'ADERIU' && mem.indexOf(it.alvoId) === -1 && !E.redePorEnd[it.alvoId]) {
+            mem.push(it.alvoId); setar(tr, lr, { ENDERECOS: mem.join(';'), N_ENDERECOS: String(mem.length) });
+          }
+          if (it.grupo && it.grupo.tem) setar(tr, lr, { GRUPO_WHATSAPP: it.grupo.tem, GRUPO_ADMIN: it.grupo.tem === 'SIM' ? it.grupo.admin || '' : '',
+            GRUPO_CONTATO: it.grupo.tem === 'SIM' ? it.grupo.contato || '' : '', PM_NO_GRUPO: it.grupo.tem === 'SIM' ? it.grupo.pm || '' : '',
+            GRUPO_ATUALIZADO_EM: it.feitoEm, GRUPO_ATUALIZADO_POR: u });
+        }
+        return { tipo: it.alvoTipo, id: it.alvoId };
+      case 'PONTO_EDITAR':
+        t = tabela('pontos');
+        r = linha(t, it.alvoId);
+        setar(t, r, Object.assign({}, it.dados, autoria, it.remover ? { STATUS: 'REMOVIDO' } : {}));
+        return { tipo: 'PONTO', id: it.alvoId };
+    }
+    return null;
+  }
+
+  function pendentePara(id) {
+    return E.fila.some(function (it) {
+      return it.alvoId === id || 'CAMPO-' + uidCurto(it.uid) === id || 'PR-' + uidCurto(it.uid) === id ||
+             'PI-' + uidCurto(it.uid) === id;
+    });
+  }
+
+  /* ================================================================ */
+  /* Status, toast, painel                                             */
+  /* ================================================================ */
+  function atualizarStatus() {
+    var el = $('#status');
+    var online = navigator.onLine;
+    el.classList.toggle('offline', !online);
+    var txt = E.sincronizando ? 'Atualizando dados…'
+      : !Object.keys(E.bases).length ? (online ? 'Sem dados no aparelho' : 'Sem sinal · sem dados')
+      : (online ? 'Online' : 'Sem sinal') + ' · dados de ' + fmtDataHora(E.sincronizadoEm);
+    var pend = E.fila.length ? '<span class="pendentes">' + (E.enviando ? 'enviando ' : '') + E.fila.length +
+      ' pendente' + (E.fila.length > 1 ? 's' : '') + '</span>' : '';
+    el.innerHTML = '<span class="ponto"></span><span>' + esc(txt) + '</span>' + pend;
+  }
+
+  var timerToast = null;
+  function toast(msg, opc) {
+    opc = opc || {};
+    var el = $('#toast');
+    el.innerHTML = '<span>' + esc(msg) + '</span>';
+    if (opc.acao) {
+      var b = document.createElement('button');
+      b.textContent = opc.acao;
+      b.addEventListener('click', function () { el.hidden = true; opc.fn(); });
+      el.appendChild(b);
+    }
+    el.hidden = false;
+    clearTimeout(timerToast);
+    var dur = opc.duracao === undefined ? 3500 : opc.duracao;
+    if (dur > 0) timerToast = setTimeout(function () { el.hidden = true; }, dur);
+  }
+
+  var painelAberto = false;
+  function abrirPainel(html, tipo) {
+    var p = $('#painel');
+    $('#painel-conteudo').innerHTML = html;
+    $('#painel-conteudo').scrollTop = 0;
+    p.dataset.tipo = tipo || '';
+    p.classList.toggle('alto', /^form/.test(tipo || ''));
+    p.hidden = false;
+    if (!painelAberto) { painelAberto = true; try { history.pushState({ painel: true }, ''); } catch (e) { /* ignora */ } }
+  }
+  function fecharPainel(semHistorico) {
+    if (!painelAberto) return;
+    painelAberto = false;
+    $('#painel').hidden = true;
+    removerDestaque();
+    removerMarcaLocal();
+    if (!semHistorico) { try { history.back(); } catch (e) { /* ignora */ } }
+  }
+  window.addEventListener('popstate', function () { if (painelAberto) fecharPainel(true); });
+  $('#painel-fechar').addEventListener('click', function () { fecharPainel(); });
+
+  function destacar(x) {
+    removerDestaque();
+    if (x.geom) {
+      E.destaque = L.featureGroup([L.polygon(paraLatLngs(x.geom), { color: '#00e5ff', weight: 4, fill: false, interactive: false })]
+        .concat(x.sedeMarcada ? [L.circleMarker([x.lat, x.lon], { radius: 16, color: '#f2b134', weight: 4, fill: false, interactive: false })] : [])).addTo(E.mapa);
+    } else if (x.latlngs) {
+      E.destaque = L.polyline(x.latlngs, { color: '#00e5ff', weight: 8, opacity: 0.7, interactive: false }).addTo(E.mapa);
+    } else {
+      E.destaque = L.circleMarker([x.lat, x.lon], { radius: 16, color: '#f2b134', weight: 4, fill: false, interactive: false }).addTo(E.mapa);
+    }
+  }
+  function removerDestaque() { if (E.destaque) { E.mapa.removeLayer(E.destaque); E.destaque = null; } }
+  function marcarLocal(ll) {
+    removerMarcaLocal();
+    E.marcaLocal = L.marker(ll, { icon: L.divIcon({ className: '', html: '<div class="marca-nova"></div>', iconSize: [26, 26], iconAnchor: [13, 26] }),
+                                  interactive: false }).addTo(E.mapa);
+  }
+  function removerMarcaLocal() { if (E.marcaLocal) { E.mapa.removeLayer(E.marcaLocal); E.marcaLocal = null; } }
+
+  /** Centraliza deixando o alvo visível acima do painel. */
+  function focar(x) {
+    var alturaPainel = Math.min(window.innerHeight * 0.55, 480);
+    if (window.innerWidth >= 720) alturaPainel = 0;
+    if (x.geom && x.bbox && !x.sedeMarcada) {
+      E.mapa.fitBounds([[x.bbox[1], x.bbox[0]], [x.bbox[3], x.bbox[2]]],
+        { paddingTopLeft: [20, 90], paddingBottomRight: [20, alturaPainel + 20], maxZoom: 17 });
+      return;
+    }
+    if (x.geom && x.bbox) {   // propriedade com sede marcada: centraliza na sede, com zoom que mostra o imóvel
+      var zb = E.mapa.getBoundsZoom(L.latLngBounds([[x.bbox[1], x.bbox[0]], [x.bbox[3], x.bbox[2]]]), false, L.point(40, alturaPainel + 110));
+      var zs = Math.max(Math.min(zb, 17), 13);
+      var ps = E.mapa.project([x.lat, x.lon], zs).add([0, alturaPainel / 2]);
+      E.mapa.setView(E.mapa.unproject(ps, zs), zs);
+      return;
+    }
+    var z = Math.max(E.mapa.getZoom(), 15);
+    var p = E.mapa.project([x.lat, x.lon], z).add([0, alturaPainel / 2]);
+    E.mapa.setView(E.mapa.unproject(p, z), z);
+  }
+
+  /* ================================================================ */
+  /* Fichas                                                            */
+  /* ================================================================ */
+  function campo(rotulo, valorHtml) { return valorHtml ? '<div><dt>' + esc(rotulo) + '</dt><dd>' + valorHtml + '</dd></div>' : ''; }
+  function grupo(titulo, conteudo) { return conteudo ? '<h3>' + esc(titulo) + '</h3><dl class="campos">' + conteudo + '</dl>' : ''; }
+  function seloStatus(ok, id) {
+    return '<span class="selo' + (ok ? ' ok' : '') + '">' + (ok ? 'VALIDADO' : 'NÃO VALIDADO') + '</span>' +
+      (pendentePara(id) ? '<span class="selo pend" data-pend="' + esc(id) + '">AGUARDANDO ENVIO</span>' : '');
+  }
+  function atualizarSelosPendentes() {
+    Array.prototype.forEach.call(document.querySelectorAll('#painel [data-pend]'), function (el) {
+      if (!pendentePara(el.getAttribute('data-pend'))) el.remove();
+    });
+  }
+  function tel(v) { return v ? '<a href="tel:' + esc(String(v).replace(/[^\d+]/g, '')) + '">' + esc(v) + '</a>' : ''; }
+  function distancia(x) {
+    if (!E.gps.pos) return '';
+    return esc(fmtDist(distanciaM(E.gps.pos.lat, E.gps.pos.lon, x.lat, x.lon))) + ' em linha reta, rumo ' +
+           esc(rumo(E.gps.pos.lat, E.gps.pos.lon, x.lat, x.lon));
+  }
+  function blocoVisita(d) {
+    return grupo('Última visita', campo('Data', d.DATA_ULTIMA_VISITA
+      ? esc(fmtDataCompleta(d.DATA_ULTIMA_VISITA)) + ' · ' + esc(haQuanto(d.DATA_ULTIMA_VISITA)) +
+        (d.ULTIMA_VISITA_POR ? '<br><small>por ' + esc(d.ULTIMA_VISITA_POR) + '</small>' : '')
+      : '<span class="vazio-txt">Nunca visitado pelo sistema</span>'));
+  }
+  function botoesNavegar(x) {
+    var c = x.lat.toFixed(6) + ', ' + x.lon.toFixed(6);
+    return '<div class="acoes">' +
+      '<a class="btn btn-secundario" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=' + x.lat + ',' + x.lon + '">Google Maps</a>' +
+      '<a class="btn btn-secundario" target="_blank" rel="noopener" href="https://waze.com/ul?ll=' + x.lat + ',' + x.lon + '&navigate=yes">Waze</a>' +
+      '<button class="btn btn-secundario largo" data-copiar="' + esc(c) + '">Copiar coordenadas</button></div>';
+  }
+  function rodape(x) {
+    var d = x.d;
+    return '<p class="rodape-ficha">' + esc(nomeMunicipio(x.mun)) + ' · ID ' + esc(x.id) +
+      (d.ATUALIZADO_POR ? '<br>Atualizado por ' + esc(d.ATUALIZADO_POR) + ' em ' + esc(fmtDataHora(d.ATUALIZADO_EM)) : '') + '</p>';
+  }
+
+  function abrirFichaEnd(e, semMover) {
+    var d = e.d, prop = E.propPorId[e.idProp];
+    destacar(e);
+    var endereco = [d.LOGRADOURO, d.NUMERO && d.NUMERO !== 'SN' ? 'nº ' + d.NUMERO : (d.NUMERO === 'SN' ? 's/nº' : '')].filter(Boolean).join(', ');
+    var html =
+      '<p class="ficha-tipo"><span class="bolinha-in" style="background:' + (CORES_ESPECIE[e.especie] || COR_PADRAO) + '"></span>' +
+      'Endereço · ' + esc(e.especie) + seloStatus(e.validado, e.id) + '</p>' +
+      '<h2>' + esc(e.titulo) + '</h2>' + (e.subtitulo ? '<p class="subtitulo-ficha">' + esc(e.subtitulo) + '</p>' : '') +
+      (e.ehSede ? '<p class="selo-sede">Sede / ponto de referência da propriedade</p>' : '') +
+      (d.OBS_SEGURANCA ? '<div class="alerta"><strong>Segurança:</strong> ' + esc(d.OBS_SEGURANCA) + '</div>' : '') +
+      (prop ? '<button class="link-prop" data-abrir-prop="' + esc(prop.id) + '"><span class="marca-prop mini" style="background:' +
+              (prop.validado ? COR_PROP.VALIDADO : COR_PROP.NAO_VALIDADO) + '"></span>Dentro de: <strong>' + esc(prop.titulo) + '</strong> ›</button>' : '') +
+      '<div class="acoes acoes-topo">' +
+        '<button class="btn btn-primario" data-acao="editar-end" data-id="' + esc(e.id) + '">Atualizar informações</button>' +
+        '<button class="btn btn-secundario" data-acao="visita-end" data-id="' + esc(e.id) + '">Registrar visita</button></div>' +
+      blocoVisita(d) +
+      linkRede(redeDe(e), e) +
+      grupo('Morador', campo('Nome', esc(d.MORADOR)) + campo('Telefone', tel(d.CONTATO)) +
+        campo('Moradores', esc(d.N_MORADORES)) + campo('Placas', esc(d.PLACAS_VEICULOS)) +
+        campo('Cão', esc(simNao(d.TEM_CAO))) + campo('Câmeras', esc(simNao(d.TEM_CAMERAS)))) +
+      grupo('Localização', campo('Município', esc(nomeMunicipio(e.mun))) + campo('Localidade', esc(d.LOCALIDADE)) +
+        campo('Nome local', d.NOME_LOCAL ? esc(d.NOME_LOCAL) + ' <small class="nao-oficial">não oficial</small>' : '') +
+        campo('Endereço', esc(endereco)) + campo('Complemento', esc(d.COMPLEMENTO)) + campo('CEP', esc(d.CEP)) +
+        campo('Coordenadas', esc(e.lat.toFixed(6) + ', ' + e.lon.toFixed(6)) + (/^GPS_CAMPO/.test(d.PRECISAO_COORD) ? '<br><small>conferida em campo</small>' : '')) +
+        campo('Distância', distancia(e)) + campo('Como chegar', esc(d.COMO_CHEGAR))) +
+      botoesNavegar(e) +
+      '<div class="acoes"><button class="btn btn-perigo-leve largo" data-acao="excluir-end" data-id="' + esc(e.id) + '">Excluir endereço (não confere com a realidade)</button></div>' +
+      rodape(e);
+    abrirPainel(html, 'ficha-end');
+    if (!semMover) focar(e);
+  }
+
+  function abrirFichaProp(p, semMover) {
+    var d = p.d, b = p.base || {};
+    destacar(p);
+    var rebanho = listaDe(d.REBANHO).join(' · ');
+    var operadora = d.SINAL_CELULAR === 'SIM' && d.OPERADORA ? ' (' + d.OPERADORA + ')' : '';
+    var lista = p.ends.slice().sort(function (a, b) { return (b.ehSede ? 1 : 0) - (a.ehSede ? 1 : 0); }).slice(0, 30).map(function (e) {
+      return '<li><button class="resultado" data-abrir-end="' + esc(e.id) + '"><span class="bolinha" style="background:' + corEnd(e) + '"></span>' +
+        '<span class="txt"><span class="t1">' + esc(e.titulo) + (e.ehSede ? ' <small class="oficial">sede</small>' : '') + '</span><span class="t2">' + esc([e.titulo !== e.especie ? e.especie : '', e.endereco].filter(Boolean).join(' · ')) + '</span></span></button></li>';
+    }).join('');
+    var html =
+      '<p class="ficha-tipo"><span class="marca-prop mini" style="background:' + (p.validado ? COR_PROP.VALIDADO : COR_PROP.NAO_VALIDADO) + '"></span>' +
+      'Propriedade rural' + (d.TIPO_PROPRIEDADE ? ' · ' + esc(d.TIPO_PROPRIEDADE) : '') + seloStatus(p.validado, p.id) + '</p>' +
+      '<h2>' + esc(p.titulo) + '</h2>' +
+      (d.OBS_SEGURANCA ? '<div class="alerta"><strong>Segurança:</strong> ' + esc(d.OBS_SEGURANCA) + '</div>' : '') +
+      '<div class="acoes acoes-topo">' +
+        '<button class="btn btn-primario" data-acao="editar-prop" data-id="' + esc(p.id) + '">Atualizar informações</button>' +
+        '<button class="btn btn-secundario" data-acao="visita-prop" data-id="' + esc(p.id) + '">Registrar visita</button></div>' +
+      linkRede(redeDe(p), p) + blocoVisita(d) +
+      grupo('Responsáveis', campo('Proprietário', esc(d.PROPRIETARIO)) + campo('Telefone', tel(d.CONTATO)) +
+        campo('Caseiro / adm.', esc(d.CASEIRO)) + campo('Tel. caseiro', tel(d.CONTATO_CASEIRO))) +
+      grupo('Atividade', campo('Atividades', esc(listaDe(d.ATIVIDADES).join(', '))) + campo('Culturas', esc(listaDe(d.CULTURAS).join(', '))) +
+        campo('Rebanho', esc(rebanho)) + campo('Máquinas e bens', esc(listaDe(d.MAQUINARIO_BENS).join(', ')))) +
+      grupo('Segurança e rotina', campo('Placas', esc(d.PLACAS_VEICULOS)) + campo('Cão', esc(simNao(d.TEM_CAO))) +
+        campo('Câmeras', esc(simNao(d.TEM_CAMERAS))) + campo('Cerca elétrica', esc(simNao(d.CERCA_ELETRICA))) +
+        campo('Sinal de celular', esc(simNao(d.SINAL_CELULAR) + operadora)) + campo('Fica vazia', esc(d.PERIODOS_VAZIA)) +
+        campo('Grupo de vizinhos', esc(simNao(d.GRUPO_VIZINHOS)))) +
+      grupo('Imóvel', campo('Município', esc(nomeMunicipio(p.mun))) + campo('Área', b.AREA_HA ? esc(fmtArea(b.AREA_HA)) : '') +
+        campo('Módulos fiscais', esc(b.MOD_FISCAL)) + campo('CAR', b.COD_CAR ? '<small>' + esc(b.COD_CAR) + '</small>' : 'Sem CAR (cadastrada em campo)') +
+        campo('Situação no CAR', esc(b.CONDICAO)) +
+        campo(p.sedeMarcada ? 'Sede' : 'Centro', esc(p.lat.toFixed(6) + ', ' + p.lon.toFixed(6)) +
+          (E.endPorId[d.SEDE_ENDERECO] ? '<br><button class="link-mini" data-abrir-end="' + esc(d.SEDE_ENDERECO) + '">' + esc(E.endPorId[d.SEDE_ENDERECO].endereco || E.endPorId[d.SEDE_ENDERECO].titulo) + ' ›</button>'
+            : p.sedeMarcada ? '<br><small>marcada em campo</small>' : '<br><small>centro do imóvel (CAR) · nenhum endereço marcado como sede</small>')) +
+        campo('Distância', distancia(p)) + campo('Como chegar', esc(d.COMO_CHEGAR))) +
+      (p.ends.length ? '<h3>Endereços dentro do imóvel (' + p.ends.length + ')</h3><ul class="resultados">' + lista + '</ul>' +
+        (p.ends.length > 30 ? '<p class="dica">Mostrando 30.</p>' : '') : '') +
+      botoesNavegar(p) +
+      '<div class="acoes"><button class="btn btn-perigo-leve largo" data-acao="excluir-prop" data-id="' + esc(p.id) + '">Excluir propriedade (não confere com a realidade)</button></div>' +
+      rodape(p);
+    abrirPainel(html, 'ficha-prop');
+    if (!semMover) focar(p);
+  }
+
+  function abrirFichaVia(v) {
+    var d = v.d, validada = String(d.STATUS).toUpperCase() === 'VALIDADO';
+    destacar(v);
+    var html = '<p class="ficha-tipo">Trecho de via (IBGE)' + seloStatus(validada, v.id) + '</p>' +
+      '<h2>' + esc(d.TIPO_VIA || 'Via rural') + ' · ' + esc(fmtDist(Number(v.m) || 0)) + '</h2>' +
+      (/Intransit/.test(d.TRAFEGAVEL_VIATURA) ? '<div class="alerta perigo">Marcado como intransitável.</div>' : '') +
+      '<dl class="campos">' + campo('Condição', esc(d.CONDICAO)) + campo('Viatura', esc(d.TRAFEGAVEL_VIATURA)) +
+      campo('Observações', esc(d.OBS)) + campo('Conferido', validada && d.ATUALIZADO_POR ? esc(d.ATUALIZADO_POR + ' em ' + fmtDataHora(d.ATUALIZADO_EM)) : '') +
+      campo('Município', esc(nomeMunicipio(v.mun))) + '</dl>' +
+      (validada ? '' : '<div class="alerta">Trecho percorrido pelos recenseadores do Censo 2022. Ainda não conferido pela patrulha.</div>') +
+      '<div class="acoes"><button class="btn btn-primario largo" data-acao="validar-via" data-id="' + esc(v.id) + '">' +
+      (validada ? 'Atualizar trecho' : 'Conferir este trecho') + '</button></div>';
+    abrirPainel(html, 'ficha-via');
+  }
+
+  function abrirFichaPonto(pt) {
+    var o = pt.d, est = ESTILO_PONTO[o.TIPO] || ESTILO_PONTO.Outro;
+    destacar(pt);
+    var html = '<p class="ficha-tipo"><span class="marca-ponto mini" style="background:' + est[0] + '">' + esc(est[1]) + '</span>' +
+      esc(o.TIPO || 'Ponto de interesse') + (pendentePara(o.ID) ? '<span class="selo pend" data-pend="' + esc(o.ID) + '">AGUARDANDO ENVIO</span>' : '') + '</p>' +
+      '<h2>' + esc(o.NOME || o.TIPO || 'Ponto de interesse') + '</h2><dl class="campos">' +
+      campo('Descrição', esc(o.DESCRICAO)) +
+      campo('Sinal de celular', esc(simNao(o.TEM_SINAL_CELULAR) + (o.OPERADORA ? ' (' + o.OPERADORA + ')' : ''))) +
+      campo('Coordenadas', esc(pt.lat.toFixed(6) + ', ' + pt.lon.toFixed(6))) + campo('Distância', distancia(pt)) +
+      campo('Município', esc(nomeMunicipio(pt.mun))) + campo('Cadastrado por', esc(o.ATUALIZADO_POR)) + '</dl>' +
+      '<div class="acoes"><button class="btn btn-primario" data-acao="editar-ponto" data-id="' + esc(o.ID) + '">Editar</button>' +
+      '<button class="btn btn-perigo" data-acao="remover-ponto" data-id="' + esc(o.ID) + '">Remover</button>' +
+      '<button class="btn btn-secundario largo" data-copiar="' + esc(pt.lat.toFixed(6) + ', ' + pt.lon.toFixed(6)) + '">Copiar coordenadas</button></div>';
+    abrirPainel(html, 'ficha-ponto');
+  }
+
+  /* ================================================================ */
+  /* Formulários                                                       */
+  /* ================================================================ */
+  var F = {
+    texto: function (n, r, v, x) { return '<label class="campo">' + esc(r) + '<input name="' + n + '" value="' + esc(v) + '" ' + (x || '') + '></label>'; },
+    area: function (n, r, v, dica) {
+      return '<label class="campo">' + esc(r) + '<textarea name="' + n + '" rows="3" maxlength="1000" placeholder="' + esc(dica || '') + '">' + esc(v) + '</textarea></label>';
+    },
+    simNao: function (n, r, v) {
+      return '<div class="campo"><span>' + esc(r) + '</span><div class="seg3">' + [['SIM', 'Sim'], ['NAO', 'Não'], ['', 'Não sei']].map(function (o) {
+        return '<label><input type="radio" name="' + n + '" value="' + o[0] + '"' + (String(v || '') === o[0] ? ' checked' : '') + '><span>' + o[1] + '</span></label>';
+      }).join('') + '</div></div>';
+    },
+    chips: function (n, r, opcoes, v, comOutro) {
+      var at = listaDe(v), outros = at.filter(function (x) { return opcoes.indexOf(x) === -1; });
+      return '<div class="campo"><span>' + esc(r) + '</span><div class="chips">' + opcoes.map(function (o) {
+        return '<label class="chip"><input type="checkbox" name="' + n + '" value="' + esc(o) + '"' + (at.indexOf(o) !== -1 ? ' checked' : '') + '><span>' + esc(o) + '</span></label>';
+      }).join('') + '</div>' + (comOutro === false ? '' : '<input name="' + n + '__outro" class="outro" placeholder="Outro (escreva)" value="' + esc(outros.join('; ')) + '">') + '</div>';
+    },
+    escolha: function (n, r, opcoes, v, obrig) {
+      return '<label class="campo">' + esc(r) + '<select name="' + n + '"' + (obrig ? ' required' : '') + '><option value="">' + (obrig ? 'Selecione…' : '—') + '</option>' +
+        opcoes.map(function (o) { return '<option' + (o === v ? ' selected' : '') + '>' + esc(o) + '</option>'; }).join('') + '</select></label>';
+    },
+    caixa: function (n, r, marcado) {
+      return '<label class="opcao opcao-form"><input type="checkbox" name="' + n + '"' + (marcado ? ' checked' : '') + '><span>' + r + '</span></label>';
+    },
+    rebanho: function (v) {
+      var atual = {};
+      listaDe(v).forEach(function (x) { var m = /^(.+?):\s*(\d+)$/.exec(x); if (m) atual[m[1]] = m[2]; else atual.Outros = (atual.Outros ? atual.Outros + '; ' : '') + x; });
+      return '<div class="campo"><span>Rebanho (nº de cabeças)</span><div class="rebanho">' + OPCOES.REBANHO.map(function (r) {
+        return '<label>' + esc(r) + '<input type="number" min="0" max="999999" inputmode="numeric" name="REB__' + esc(r) + '" value="' + esc(atual[r] || '') + '"></label>';
+      }).join('') + '</div><input name="REB__Outros" class="outro" placeholder="Outros animais (ex.: Búfalos: 10)" value="' + esc(atual.Outros || '') + '"></div>';
+    },
+    ler: function (form) {
+      var r = {}, reb = [];
+      Array.prototype.forEach.call(form.elements, function (el) {
+        if (!el.name) return;
+        if (/^REB__/.test(el.name)) {
+          var nome = el.name.slice(5), val = el.value.trim();
+          if (val && nome === 'Outros') reb.push(val);
+          else if (val && Number(val) > 0) reb.push(nome + ': ' + Math.round(Number(val)));
+          return;
+        }
+        if (el.type === 'radio') { if (el.checked) r[el.name] = el.value; else if (!(el.name in r)) r[el.name] = ''; return; }
+        if (el.type === 'checkbox') {
+          if (el.closest('.chips')) { r[el.name] = r[el.name] || []; if (el.checked) r[el.name].push(el.value); }
+          else r[el.name] = el.checked;
+          return;
+        }
+        if (/__outro$/.test(el.name)) {
+          var base = el.name.replace(/__outro$/, '');
+          r[base] = r[base] || [];
+          listaDe(el.value).forEach(function (x) { r[base].push(x.trim()); });
+          return;
+        }
+        r[el.name] = el.value.trim();
+      });
+      if (form.querySelector('[name^="REB__"]')) r.REBANHO = reb.join('; ');
+      Object.keys(r).forEach(function (k) { if (Array.isArray(r[k])) r[k] = r[k].filter(Boolean).join('; '); });
+      return r;
+    }
+  };
+  function rodapeForm() {
+    return '<p class="erro" data-erro></p><div class="acoes"><button type="button" class="btn btn-secundario" data-acao="cancelar">Cancelar</button>' +
+      '<button type="submit" class="btn btn-primario">Salvar</button></div>';
+  }
+  function normalizarPlacas(txt) {
+    var placas = String(txt || '').toUpperCase().split(/[,;\n]+/).map(function (p) { return p.replace(/[\s-]/g, ''); }).filter(Boolean);
+    var ruim = placas.filter(function (p) { return !RE_PLACA.test(p); })[0];
+    if (ruim) throw new Error('Placa inválida: ' + ruim + ' (use ABC1234 ou ABC1D23).');
+    return placas.filter(function (p, i) { return placas.indexOf(p) === i; }).join(', ');
+  }
+  function opcaoGps(x, rotulo) {
+    var g = E.gps.pos;
+    if (!g) return '<p class="dica">Ligue o GPS (botão ⊕) para poder ' + rotulo.toLowerCase() + '.</p>';
+    if (g.precisao > PRECISAO_MAX_CORRECAO) return '<p class="dica">GPS com precisão de ' + Math.round(g.precisao) + ' m. Aguarde ficar abaixo de ' + PRECISAO_MAX_CORRECAO + ' m.</p>';
+    return F.caixa('corrigirPosicao', rotulo + ' <small>(está a ' + esc(fmtDist(distanciaM(g.lat, g.lon, x.lat, x.lon))) +
+                   ' daqui; GPS ±' + Math.round(g.precisao) + ' m)</small>', false);
+  }
+
+  function camposEndereco(d) {
+    return '<h3>Morador</h3>' +
+      F.texto('MORADOR', 'Nome do morador / responsável', d.MORADOR, 'maxlength="120"') +
+      F.texto('CONTATO', 'Telefone', d.CONTATO, 'type="tel" maxlength="40" inputmode="tel" placeholder="(35) 9 9999-9999"') +
+      F.texto('N_MORADORES', 'Nº de moradores', d.N_MORADORES, 'type="number" min="0" max="99" inputmode="numeric"') +
+      F.texto('PLACAS_VEICULOS', 'Placas dos veículos', d.PLACAS_VEICULOS, 'maxlength="200" autocapitalize="characters" placeholder="ABC1D23, XYZ9876"') +
+      F.simNao('TEM_CAO', 'Tem cão?', d.TEM_CAO) + F.simNao('TEM_CAMERAS', 'Tem câmeras?', d.TEM_CAMERAS) +
+      '<h3>Acesso e segurança</h3>' +
+      F.area('COMO_CHEGAR', 'Como chegar', d.COMO_CHEGAR, 'Ex.: após a ponte de madeira, segunda porteira à esquerda') +
+      F.area('OBS_SEGURANCA', 'Observações de segurança', d.OBS_SEGURANCA, 'Ex.: idoso mora sozinho');
+  }
+  function camposPropriedade(d) {
+    return '<h3>Identificação</h3>' +
+      F.texto('NOME_PROPRIEDADE', 'Nome da propriedade', d.NOME_PROPRIEDADE, 'maxlength="120" placeholder="Ex.: Fazenda Boa Esperança"') +
+      F.escolha('TIPO_PROPRIEDADE', 'Tipo', OPCOES.TIPO_PROPRIEDADE, d.TIPO_PROPRIEDADE) +
+      F.texto('PROPRIETARIO', 'Proprietário', d.PROPRIETARIO, 'maxlength="120"') +
+      F.texto('CONTATO', 'Telefone do proprietário', d.CONTATO, 'type="tel" maxlength="40" inputmode="tel"') +
+      F.texto('CASEIRO', 'Caseiro / administrador', d.CASEIRO, 'maxlength="120"') +
+      F.texto('CONTATO_CASEIRO', 'Telefone do caseiro', d.CONTATO_CASEIRO, 'type="tel" maxlength="40" inputmode="tel"') +
+      '<h3>Atividade</h3>' +
+      F.chips('ATIVIDADES', 'Atividades', OPCOES.ATIVIDADES, d.ATIVIDADES) +
+      F.chips('CULTURAS', 'Culturas / plantio', OPCOES.CULTURAS, d.CULTURAS) +
+      F.rebanho(d.REBANHO) +
+      F.chips('MAQUINARIO_BENS', 'Máquinas e bens de valor', OPCOES.MAQUINARIO_BENS, d.MAQUINARIO_BENS) +
+      '<h3>Segurança e rotina</h3>' +
+      F.texto('PLACAS_VEICULOS', 'Placas dos veículos', d.PLACAS_VEICULOS, 'maxlength="200" autocapitalize="characters" placeholder="ABC1D23, XYZ9876"') +
+      F.simNao('TEM_CAO', 'Tem cão?', d.TEM_CAO) + F.simNao('TEM_CAMERAS', 'Tem câmeras?', d.TEM_CAMERAS) +
+      F.simNao('CERCA_ELETRICA', 'Cerca elétrica?', d.CERCA_ELETRICA) +
+      F.simNao('SINAL_CELULAR', 'Tem sinal de celular na sede?', d.SINAL_CELULAR) +
+      F.escolha('OPERADORA', 'Operadora com sinal', OPCOES.OPERADORA, d.OPERADORA) +
+      F.texto('PERIODOS_VAZIA', 'Quando fica vazia', d.PERIODOS_VAZIA, 'maxlength="200" placeholder="Ex.: dias úteis durante o dia; fins de semana"') +
+      F.simNao('GRUPO_VIZINHOS', 'Participa de grupo de vizinhos?', d.GRUPO_VIZINHOS) +
+      F.area('COMO_CHEGAR', 'Como chegar', d.COMO_CHEGAR, 'Ex.: entrada pela porteira azul no km 4') +
+      F.area('OBS_SEGURANCA', 'Observações de segurança', d.OBS_SEGURANCA, 'Ex.: furto de gado em 2025');
+  }
+
+  function abrirFormEnd(e) {
+    abrirPainel('<form data-form="end-editar" data-id="' + esc(e.id) + '" novalidate><h2>Atualizar endereço</h2>' +
+      '<p class="ficha-tipo">' + esc(e.titulo) + '</p><p class="dica">Informe ao morador que os dados são para uso da Patrulha Rural.</p>' +
+      camposEndereco(e.d) + perguntaSede(e) + blocoRede(e) + '<h3>Visita e posição</h3>' + F.caixa('registrarVisita', 'Registrar visita agora', true) +
+      opcaoGps(e, 'Mover o ponto para minha posição') + rodapeForm() + '</form>', 'form-end');
+  }
+  function abrirFormProp(p) {
+    abrirPainel('<form data-form="prop-editar" data-id="' + esc(p.id) + '" novalidate><h2>Atualizar propriedade rural</h2>' +
+      '<p class="ficha-tipo">' + esc(p.titulo) + '</p><p class="dica">Informe ao responsável que os dados são para uso da Patrulha Rural.</p>' +
+      camposPropriedade(p.d) + blocoRede(p) + '<h3>Visita e sede</h3>' + F.caixa('registrarVisita', 'Registrar visita agora', true) +
+      opcaoGps(p, 'Marcar a sede na minha posição') + rodapeForm() + '</form>', 'form-prop');
+  }
+  function perguntaSede(e) {
+    var p = E.propPorId[e.idProp];
+    if (!p) return '';
+    var atual = p.d.SEDE_ENDERECO, outro = atual && atual !== e.id && E.endPorId[atual];
+    return '<h3>Propriedade rural</h3><div class="pergunta-sede">' +
+      F.caixa('SEDE_PROP', 'Este ponto é a <b>sede / ponto de referência</b> da propriedade <b>' + esc(p.titulo) + '</b>', atual === e.id) +
+      '<p class="dica">Marcado, a busca e a navegação para a propriedade levam a este ponto, e não ao centro do imóvel.' +
+      (outro ? ' Hoje a sede marcada é outra: <b>' + esc(outro.titulo) + '</b> (será substituída).' : '') + '</p></div>';
+  }
+  function extrairSede(form, v, novaPosicao) {
+    var marcado = !!v.SEDE_PROP; delete v.SEDE_PROP;
+    if (!form.querySelector('[name=SEDE_PROP]')) return null;
+    var e = E.endPorId[form.getAttribute('data-id')], p = e && E.propPorId[e.idProp];
+    if (!p) return null;
+    var era = p.d.SEDE_ENDERECO === e.id;
+    if (marcado === era && !(marcado && novaPosicao)) return null;
+    var pos = novaPosicao || { lat: e.lat, lon: e.lon };
+    return { tipo: 'PROP_SEDE', alvoId: p.id, enderecoId: e.id, lat: pos.lat, lon: pos.lon, remover: !marcado };
+  }
+
+  function abrirFormVisita(x) {
+    abrirPainel('<form data-form="visita" data-id="' + esc(x.id) + '" data-tipo="' + x.tipo + '"><h2>Registrar visita</h2>' +
+      '<p class="ficha-tipo">' + esc(x.titulo) + '</p>' +
+      F.area('obs', 'Observação (opcional)', '', 'Ex.: tudo em ordem; morador relatou movimentação estranha à noite') +
+      blocoRede(x) + rodapeForm().replace('>Salvar<', '>Registrar<') + '</form>', 'form-visita');
+  }
+  function abrirFormExcluir(x) {
+    var nome = x.tipo === 'END' ? 'endereço' : 'propriedade';
+    abrirPainel('<form data-form="excluir" data-id="' + esc(x.id) + '" data-tipo="' + x.tipo + '"><h2>Excluir ' + nome + '</h2>' +
+      '<p class="ficha-tipo">' + esc(x.titulo) + '</p>' +
+      '<div class="alerta perigo">Deixa de aparecer no mapa de todos os militares. Continua guardado na planilha com o motivo, e o administrador pode restaurar.</div>' +
+      '<div class="campo"><span>Motivo</span><div class="opcoes">' + MOTIVOS_EXCLUSAO.map(function (m) {
+        return '<label class="opcao opcao-form"><input type="radio" name="motivo" value="' + esc(m) + '"><span>' + esc(m) + '</span></label>';
+      }).join('') + '</div></div>' + F.area('obs', 'Observação', '', 'Ex.: casa demolida em 2024') +
+      '<p class="erro" data-erro></p><div class="acoes"><button type="button" class="btn btn-secundario" data-acao="cancelar">Cancelar</button>' +
+      '<button type="submit" class="btn btn-perigo">Excluir</button></div></form>', 'form-excluir');
+  }
+  function abrirFormVia(v) {
+    destacar(v);
+    var d = v.d;
+    abrirPainel('<form data-form="via" data-id="' + esc(v.id) + '"><h2>Conferir trecho de via</h2>' +
+      '<p class="dica">Confirme como é a via neste trecho (destacado no mapa).</p>' +
+      F.escolha('TIPO_VIA', 'Tipo de via', OPCOES.TIPO_VIA, d.TIPO_VIA, true) + F.escolha('CONDICAO', 'Condição', OPCOES.CONDICAO, d.CONDICAO, true) +
+      F.escolha('TRAFEGAVEL_VIATURA', 'Passa viatura?', OPCOES.VIATURA, d.TRAFEGAVEL_VIATURA, true) +
+      F.area('OBS', 'Observações', d.OBS, 'Ex.: atoleiro em dia de chuva') + rodapeForm() + '</form>', 'form-via');
+  }
+  function abrirFormPonto(local, pt) {
+    var o = pt ? pt.d : {};
+    abrirPainel('<form data-form="' + (pt ? 'ponto-editar' : 'ponto-novo') + '"' + (pt ? ' data-id="' + esc(o.ID) + '"' : atributosLocal(local)) + '>' +
+      '<h2>' + (pt ? 'Editar ponto' : 'Novo ponto de interesse') + '</h2>' + (pt ? '' : '<p class="dica">' + descricaoLocal(local) + '</p>') +
+      F.escolha('TIPO', 'Tipo', OPCOES.TIPO_PONTO, o.TIPO, true) +
+      F.texto('NOME', 'Nome / referência', o.NOME, 'maxlength="120" placeholder="Ex.: Ponte do Ribeirão das Antas"') +
+      F.area('DESCRICAO', 'Descrição', o.DESCRICAO, 'Ex.: suporta viatura até 3 t') +
+      F.simNao('TEM_SINAL_CELULAR', 'Tem sinal de celular aqui?', o.TEM_SINAL_CELULAR) +
+      F.escolha('OPERADORA', 'Operadora', OPCOES.OPERADORA, o.OPERADORA) + rodapeForm() + '</form>', 'form-ponto');
+    if (!pt) marcarLocal([local.lat, local.lon]);
+  }
+  /** Nomes oficiais (IBGE) perto do ponto: endereço mais próximo, localidades e logradouros por distância. */
+  function referenciasIbge(lat, lon, mun) {
+    var kx = Math.cos(lat * Math.PI / 180) * 111320, ky = 110540;
+    var locs = {}, logs = {}, perto = null;
+    E.ends.forEach(function (e) {
+      if (!e.base || e.mun !== mun || e.excluido) return;
+      var dx = (e.lon - lon) * kx, dy = (e.lat - lat) * ky, d = Math.sqrt(dx * dx + dy * dy);
+      if (!perto || d < perto.d) perto = { e: e, d: d };
+      var l = String(e.base.LOCALIDADE || '').trim(), g = String(e.base.LOGRADOURO || '').trim();
+      if (l && (!(l in locs) || d < locs[l])) locs[l] = d;
+      if (g && d <= 5000 && (!(g in logs) || d < logs[g])) logs[g] = d;
+    });
+    function ordenar(m, max) {
+      return Object.keys(m).sort(function (a, b) { return m[a] - m[b]; }).slice(0, max).map(function (k) { return { nome: k, d: m[k] }; });
+    }
+    return { perto: perto, localidades: ordenar(locs, 40), logradouros: ordenar(logs, 40) };
+  }
+  function escolhaOficial(nome, rotulo, lista, valor, vazio) {
+    return '<label class="campo">' + esc(rotulo) + ' <small class="oficial">nome oficial IBGE</small><select name="' + nome + '">' +
+      (vazio ? '<option value="">' + esc(vazio) + '</option>' : '') +
+      lista.map(function (x) {
+        return '<option value="' + esc(x.nome) + '"' + (x.nome === valor ? ' selected' : '') + '>' + esc(x.nome) + ' · ' + fmtDist(x.d) + '</option>';
+      }).join('') + '</select></label>';
+  }
+  function abrirFormNovoEnd(local) {
+    var prop = propriedadeEm(local.lat, local.lon);
+    var ref = referenciasIbge(local.lat, local.lon, local.mun);
+    var p = ref.perto && ref.perto.d <= 3000 ? ref.perto : null;
+    var locPadrao = p ? String(p.e.base.LOCALIDADE || '') : (ref.localidades[0] ? ref.localidades[0].nome : '');
+    var logPadrao = p && p.d <= 1500 ? String(p.e.base.LOGRADOURO || '') : '';
+    var blocoLocal = ref.localidades.length
+      ? (p ? '<div class="ref-ibge"><small>Endereço do IBGE mais próximo · ' + fmtDist(p.d) + '</small><b>' + esc(p.e.endereco || p.e.titulo) + '</b>' +
+             (p.e.base.LOCALIDADE ? '<span>' + esc(p.e.base.LOCALIDADE) + '</span>' : '') + '</div>' +
+             '<input type="hidden" name="REF_IBGE" value="' + esc(p.e.id) + '">'
+           : '<p class="dica">Nenhum endereço do IBGE a menos de 3 km. Escolha a localidade mais próxima.</p>') +
+        escolhaOficial('LOCALIDADE', 'Localidade', ref.localidades, locPadrao) +
+        escolhaOficial('LOGRADOURO', 'Estrada / logradouro', ref.logradouros, logPadrao, 'Sem nome no IBGE / não se aplica')
+      : '<p class="dica">Este município ainda não tem endereços do IBGE no aparelho. Use o nome local abaixo.</p>';
+    abrirPainel('<form data-form="end-novo"' + atributosLocal(local) + (prop ? ' data-prop="' + esc(prop.id) + '"' : '') + ' novalidate>' +
+      '<h2>Novo endereço</h2><p class="dica">' + descricaoLocal(local) + (prop ? '<br>Dentro de: <strong>' + esc(prop.titulo) + '</strong>' : '') + '</p>' +
+      F.escolha('ESPECIE', 'Tipo', OPCOES.ESPECIE_NOVA, 'Domicílio particular', true) +
+      blocoLocal +
+      F.texto('NUMERO', 'Número / km', '', 'maxlength="20"') +
+      '<label class="campo">Nome local <small class="nao-oficial">não oficial · opcional</small><input name="NOME_LOCAL" maxlength="120" placeholder="Como a comunidade chama (ex.: Sítio Boa Vista)"></label>' +
+      '<p class="dica" style="margin-top:-6px">O nome local fica guardado ao lado do oficial, nunca no lugar dele.</p>' +
+      camposEndereco({}) + blocoRede({ tipo: 'END', id: '', lat: local.lat, lon: local.lon, mun: local.mun, d: {}, novo: true }) +
+      F.caixa('registrarVisita', 'Registrar visita agora', true) + rodapeForm() + '</form>', 'form-end-novo');
+    marcarLocal([local.lat, local.lon]);
+  }
+  function abrirFormNovaProp(local) {
+    abrirPainel('<form data-form="prop-nova"' + atributosLocal(local) + ' novalidate><h2>Nova propriedade rural</h2>' +
+      '<p class="dica">' + descricaoLocal(local) + '<br>Use só para propriedade que <strong>não aparece</strong> no mapa (sem CAR). ' +
+      'O ponto marca a sede.</p>' + camposPropriedade({}) + F.caixa('registrarVisita', 'Registrar visita agora', true) + rodapeForm() + '</form>', 'form-prop-nova');
+    marcarLocal([local.lat, local.lon]);
+  }
+  function atributosLocal(l) {
+    return ' data-lat="' + l.lat + '" data-lon="' + l.lon + '" data-prec="' + (l.precisao || 0) + '" data-fonte="' + l.fonte + '" data-mun="' + l.mun + '"';
+  }
+  function descricaoLocal(l) {
+    return (l.fonte === 'GPS' ? 'Posição: sua localização atual (GPS ±' + Math.round(l.precisao) + ' m)' : 'Posição: o ponto marcado no mapa (pino amarelo)') +
+      ' · ' + esc(nomeMunicipio(l.mun)) + '.';
+  }
+
+  function municipioEm(lat, lon) {
+    var achado = null;
+    Object.keys(E.bases).forEach(function (cod) { if (!achado && naGeometria(lon, lat, E.bases[cod].limite)) achado = cod; });
+    return achado;
+  }
+  function propriedadeEm(lat, lon) {
+    var melhor = null;
+    E.props.forEach(function (p) {
+      if (!p.geom || !p.bbox || lon < p.bbox[0] || lon > p.bbox[2] || lat < p.bbox[1] || lat > p.bbox[3]) return;
+      if (naGeometria(lon, lat, p.geom) && (!melhor || (p.base.AREA_HA || 0) < (melhor.base.AREA_HA || 0))) melhor = p;
+    });
+    return melhor;
+  }
+
+  function abrirAdicionar(latlng) {
+    var local;
+    if (latlng) local = { lat: latlng.lat, lon: latlng.lng, precisao: 0, fonte: 'MAPA' };
+    else if (E.gps.pos) local = { lat: E.gps.pos.lat, lon: E.gps.pos.lon, precisao: E.gps.pos.precisao, fonte: 'GPS' };
+    if (!local) {
+      abrirPainel('<h2>Cadastrar</h2><p class="dica">Ligue o GPS (botão ⊕) para cadastrar onde você está, ou <strong>toque e segure</strong> no mapa sobre o local.</p>' +
+        '<div class="acoes"><button class="btn btn-primario largo" data-acao="ligar-gps">Ligar GPS</button></div>', 'adicionar');
+      return;
+    }
+    local.mun = municipioEm(local.lat, local.lon);
+    if (!local.mun) {
+      toast('Este local está fora dos municípios carregados neste aparelho.', { duracao: 5000 });
+      return;
+    }
+    E._local = local;
+    marcarLocal([local.lat, local.lon]);
+    var prop = propriedadeEm(local.lat, local.lon);
+    abrirPainel('<h2>Cadastrar aqui</h2><p class="dica">' + descricaoLocal(local) + '</p>' +
+      (prop ? '<button class="link-prop" data-abrir-prop="' + esc(prop.id) + '"><span class="marca-prop mini" style="background:' +
+              (prop.validado ? COR_PROP.VALIDADO : COR_PROP.NAO_VALIDADO) + '"></span>Este ponto fica dentro de: <strong>' + esc(prop.titulo) + '</strong> ›</button>' : '') +
+      '<div class="menu-acoes">' +
+        '<button class="btn btn-primario" data-acao="novo-end">Novo endereço (casa, igreja, escola…)</button>' +
+        (prop ? '' : '<button class="btn btn-secundario" data-acao="nova-prop">Nova propriedade rural (sem CAR)</button>') +
+        '<button class="btn btn-secundario" data-acao="novo-ponto">Ponto de interesse (ponte, porteira, sinal…)</button></div>', 'adicionar');
+  }
+
+  $('#painel-conteudo').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var form = ev.target, erro = form.querySelector('[data-erro]');
+    if (erro) erro.textContent = '';
+    try { salvarFormulario(form); } catch (e) {
+      if (erro) { erro.textContent = e.message; erro.scrollIntoView({ block: 'center' }); } else toast(e.message);
+    }
+  });
+
+  function salvarFormulario(form) {
+    var tipo = form.getAttribute('data-form'), id = form.getAttribute('data-id');
+    if (tipo === 'usuario') return salvarUsuario(form);
+    if (tipo === 'rede-param') return calcularSugestoes(form);
+    if (tipo === 'rede-aprovar') return aprovarRede(form);
+    if (tipo === 'municipios') {
+      var cods = Array.prototype.filter.call(form.querySelectorAll('input[name=mun]'), function (i) { return i.checked; })
+        .map(function (i) { return i.value; });
+      if (!cods.length) throw new Error('Escolha pelo menos um município.');
+      E.prefs.munSel = cods; LS.set('prefs', E.prefs);
+      fecharPainel();
+      E.enquadrado = false;
+      return sincronizar(false);
+    }
+    var v = F.ler(form);
+    var redeItem = extrairContatoRede(form, v);
+    var local = form.hasAttribute('data-lat') ? {
+      lat: Number(form.getAttribute('data-lat')), lon: Number(form.getAttribute('data-lon')),
+      precisao: Number(form.getAttribute('data-prec')) || 0, fonte: form.getAttribute('data-fonte')
+    } : null;
+    var mun = form.getAttribute('data-mun');
+    if (v.PLACAS_VEICULOS !== undefined) v.PLACAS_VEICULOS = normalizarPlacas(v.PLACAS_VEICULOS);
+    if (v.N_MORADORES !== undefined && v.N_MORADORES !== '' && !/^\d{1,2}$/.test(v.N_MORADORES)) throw new Error('Nº de moradores inválido.');
+    var registrarVisita = !!v.registrarVisita, corrigir = !!v.corrigirPosicao;
+    delete v.registrarVisita; delete v.corrigirPosicao;
+
+    function posGps() {
+      if (!E.gps.pos || E.gps.pos.precisao > PRECISAO_MAX_CORRECAO) throw new Error('GPS sem precisão suficiente.');
+      return { lat: E.gps.pos.lat, lon: E.gps.pos.lon, precisao: E.gps.pos.precisao, fonte: 'GPS' };
+    }
+    function alteracoes(atual) {
+      var d = {};
+      Object.keys(v).forEach(function (k) { if (String(atual[k] || '') !== String(v[k] || '')) d[k] = v[k] || ''; });
+      return d;
+    }
+    if (tipo === 'end-editar' || tipo === 'prop-editar') {
+      var ehEnd = tipo === 'end-editar', x = ehEnd ? E.endPorId[id] : E.propPorId[id];
+      var novaPos = corrigir ? posGps() : null;
+      var sedeItem = ehEnd ? extrairSede(form, v, novaPos) : null;
+      var item = { tipo: ehEnd ? 'END_EDITAR' : 'PROP_EDITAR', alvoId: id, dados: alteracoes(x.d), registrarVisita: registrarVisita };
+      if (novaPos) item.novaPosicao = novaPos;
+      if (!Object.keys(item.dados).length && !item.novaPosicao) {
+        if (!registrarVisita && !redeItem && !sedeItem) throw new Error('Nada foi alterado.');
+        item = registrarVisita ? { tipo: ehEnd ? 'END_VISITA' : 'PROP_VISITA', alvoId: id } : null;
+      }
+      return concluir(item, [redeItem, sedeItem]);
+    }
+    if (tipo === 'visita') {
+      return concluir({ tipo: form.getAttribute('data-tipo') === 'END' ? 'END_VISITA' : 'PROP_VISITA', alvoId: id, obs: v.obs || '' }, redeItem);
+    }
+    if (tipo === 'excluir') {
+      if (!v.motivo) throw new Error('Escolha o motivo da exclusão.');
+      if (v.motivo === 'Outro' && !v.obs) throw new Error('Descreva o motivo na observação.');
+      return concluir({ tipo: form.getAttribute('data-tipo') === 'END' ? 'END_EXCLUIR' : 'PROP_EXCLUIR', alvoId: id, motivo: v.motivo, obs: v.obs || '' });
+    }
+    if (tipo === 'end-novo' || tipo === 'prop-nova') {
+      if (tipo === 'end-novo' && !v.ESPECIE) throw new Error('Escolha o tipo.');
+      var limpo = {};
+      Object.keys(v).forEach(function (k) { if (v[k]) limpo[k] = v[k]; });
+      return concluir({ tipo: tipo === 'end-novo' ? 'END_NOVO' : 'PROP_NOVA', mun: mun, dados: limpo, novaPosicao: local,
+                        registrarVisita: registrarVisita, idPropriedade: form.getAttribute('data-prop') || '' }, redeItem);
+    }
+    if (tipo === 'via') {
+      if (!v.TIPO_VIA || !v.CONDICAO || !v.TRAFEGAVEL_VIATURA) throw new Error('Preencha tipo, condição e se passa viatura.');
+      return concluir({ tipo: 'VIA_VALIDAR', alvoId: id, dados: v });
+    }
+    if (tipo === 'ponto-novo' || tipo === 'ponto-editar') {
+      if (!v.TIPO) throw new Error('Escolha o tipo do ponto.');
+      return concluir(tipo === 'ponto-novo' ? { tipo: 'PONTO_NOVO', mun: mun, dados: v, novaPosicao: local }
+                                            : { tipo: 'PONTO_EDITAR', alvoId: id, dados: v });
+    }
+  }
+
+  /** Salva e reabre a ficha atualizada (ou fecha, se o registro saiu do mapa). */
+  function concluir(item, extras) {
+    removerMarcaLocal();
+    extras = (Array.isArray(extras) ? extras : [extras]).filter(Boolean);
+    if (!item) item = extras.shift();
+    return registrar(item, extras).then(function (alvo) {
+      if (!alvo) return fecharPainel();
+      if (alvo.tipo === 'END' && E.endPorId[alvo.id]) return abrirFichaEnd(E.endPorId[alvo.id], true);
+      if (alvo.tipo === 'PROP' && E.propPorId[alvo.id]) return abrirFichaProp(E.propPorId[alvo.id], true);
+      if (alvo.tipo === 'VIA' && E.viaPorId[alvo.id]) return abrirFichaVia(E.viaPorId[alvo.id]);
+      var pt = alvo.tipo === 'PONTO' && E.pontos.filter(function (p) { return p.id === alvo.id; })[0];
+      if (pt) return abrirFichaPonto(pt);
+      fecharPainel();
+    });
+  }
+
+  $('#painel-conteudo').addEventListener('click', function (ev) {
+    var t = ev.target;
+    var mt = t.closest('[data-marcar]');
+    if (mt) {
+      var todos = mt.getAttribute('data-marcar') === 'todos';
+      Array.prototype.forEach.call(document.querySelectorAll('#painel-conteudo input[name=mun]'), function (i) { i.checked = todos; });
+      return;
+    }
+    var b = t.closest('[data-copiar]');
+    if (b) { copiar(b.getAttribute('data-copiar')); return; }
+    var ap = t.closest('[data-abrir-prop]');
+    if (ap) { var pp = E.propPorId[ap.getAttribute('data-abrir-prop')]; if (pp) abrirFichaProp(pp); return; }
+    var ae = t.closest('[data-abrir-end]');
+    if (ae) { var ee = E.endPorId[ae.getAttribute('data-abrir-end')]; if (ee) abrirFichaEnd(ee); return; }
+    var rr = t.closest('[data-resultado]');
+    if (rr) {
+      var partes = rr.getAttribute('data-resultado').split('|');
+      if (partes[0] === 'END' && E.endPorId[partes[1]]) abrirFichaEnd(E.endPorId[partes[1]]);
+      if (partes[0] === 'PROP' && E.propPorId[partes[1]]) abrirFichaProp(E.propPorId[partes[1]]);
+      return;
+    }
+    var irc = t.closest('[data-irpara]');
+    if (irc) { var c = irc.getAttribute('data-irpara').split(',').map(Number); fecharPainel(); E.mapa.setView(c, 16); destacar({ lat: c[0], lon: c[1] }); return; }
+    var a = t.closest('[data-acao]');
+    if (!a) return;
+    var id = a.getAttribute('data-id');
+    switch (a.getAttribute('data-acao')) {
+      case 'editar-end': abrirFormEnd(E.endPorId[id]); break;
+      case 'editar-prop': abrirFormProp(E.propPorId[id]); break;
+      case 'visita-end': abrirFormVisita(E.endPorId[id]); break;
+      case 'visita-prop': abrirFormVisita(E.propPorId[id]); break;
+      case 'excluir-end': abrirFormExcluir(E.endPorId[id]); break;
+      case 'excluir-prop': abrirFormExcluir(E.propPorId[id]); break;
+      case 'validar-via': abrirFormVia(E.viaPorId[id]); break;
+      case 'editar-ponto': abrirFormPonto(null, E.pontos.filter(function (x) { return x.id === id; })[0]); break;
+      case 'remover-ponto': if (confirm('Remover este ponto de interesse?')) concluir({ tipo: 'PONTO_EDITAR', alvoId: id, dados: {}, remover: true }); break;
+      case 'novo-end': abrirFormNovoEnd(E._local); break;
+      case 'nova-prop': abrirFormNovaProp(E._local); break;
+      case 'novo-ponto': abrirFormPonto(E._local); break;
+      case 'ligar-gps': fecharPainel(); if (E.gps.watch === null) iniciarGps(); break;
+      case 'cancelar': fecharPainel(); break;
+    }
+  });
+
+  function copiar(texto) {
+    function ok() { toast('Coordenadas copiadas.'); }
+    function alt() {
+      var ta = document.createElement('textarea'); ta.value = texto; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); ok(); } catch (e) { toast(texto, { duracao: 8000 }); }
+      document.body.removeChild(ta);
+    }
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(texto).then(ok, alt); else alt();
+  }
+  $('#btn-adicionar').addEventListener('click', function () { abrirAdicionar(null); });
+
+  /* ================================================================ */
+  /* Busca                                                             */
+  /* ================================================================ */
+  var campoBusca = $('#busca'), timerBusca = null;
+  campoBusca.addEventListener('input', function () {
+    $('#busca-limpar').hidden = !campoBusca.value;
+    clearTimeout(timerBusca); timerBusca = setTimeout(buscar, 200);
+  });
+  campoBusca.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter') { ev.preventDefault(); clearTimeout(timerBusca); buscar(); campoBusca.blur(); }
+  });
+  $('#busca-limpar').addEventListener('click', function () { campoBusca.value = ''; $('#busca-limpar').hidden = true; fecharPainel(); });
+
+  function buscar() {
+    var q = campoBusca.value.trim();
+    if (q.length < 2) { if ($('#painel').dataset.tipo === 'busca') fecharPainel(); return; }
+    var mc = q.match(/^\s*(-?\d{1,2}[.,]\d+)\s*[,;\s]\s*(-?\d{1,3}[.,]\d+)\s*$/);
+    if (mc) {
+      var la = numero(mc[1]), lo = numero(mc[2]);
+      abrirPainel('<h2>Coordenada</h2><ul class="resultados"><li><button class="resultado" data-irpara="' + la + ',' + lo +
+        '"><span class="txt"><span class="t1">Ir para ' + esc(la + ', ' + lo) + '</span></span></button></li></ul>', 'busca');
+      return;
+    }
+    if (!E.ends.length && !E.props.length) { abrirPainel('<p class="vazio">Ainda não há dados no aparelho.</p>', 'busca'); return; }
+    var termos = normalizar(q).split(/\s+/).filter(Boolean);
+    function bate(x) { for (var i = 0; i < termos.length; i++) if (x.busca.indexOf(termos[i]) === -1) return false; return true; }
+    var achados = E.props.filter(bate).concat(E.ends.filter(bate));
+    var pos = E.gps.pos, qn = termos.join(' ');
+    achados.sort(function (a, b) {
+      if (pos) return distanciaM(pos.lat, pos.lon, a.lat, a.lon) - distanciaM(pos.lat, pos.lon, b.lat, b.lon);
+      var sa = normalizar(a.titulo + ' ' + (a.d.MORADOR || a.d.PROPRIETARIO || '')).indexOf(qn) === -1 ? 1 : 0;
+      var sb = normalizar(b.titulo + ' ' + (b.d.MORADOR || b.d.PROPRIETARIO || '')).indexOf(qn) === -1 ? 1 : 0;
+      return sa - sb || (a.tipo === b.tipo ? 0 : a.tipo === 'PROP' ? -1 : 1) || a.titulo.localeCompare(b.titulo, 'pt-BR');
+    });
+    var total = achados.length;
+    var lista = achados.slice(0, 60).map(function (x) {
+      var icone = x.tipo === 'PROP'
+        ? '<span class="marca-prop mini" style="background:' + (x.validado ? COR_PROP.VALIDADO : COR_PROP.NAO_VALIDADO) + '"></span>'
+        : '<span class="bolinha" style="background:' + corEnd(x) + '"></span>';
+      var t1 = x.titulo;
+      var sub = (x.tipo === 'PROP' ? ['Propriedade rural' + (x.d.PROPRIETARIO ? ' de ' + x.d.PROPRIETARIO : '')] : [x.endereco || x.especie, x.d.LOCALIDADE])
+        .concat(nomeMunicipio(x.mun)).filter(Boolean).join(' · ');
+      var dist = pos ? '<span class="dist">' + esc(fmtDist(distanciaM(pos.lat, pos.lon, x.lat, x.lon))) + '</span>' : '';
+      return '<li><button class="resultado" data-resultado="' + x.tipo + '|' + esc(x.id) + '">' + icone +
+        '<span class="txt"><span class="t1">' + esc(t1) + '</span><span class="t2">' + esc(sub) + '</span></span>' + dist + '</button></li>';
+    }).join('');
+    abrirPainel('<h2>' + (total ? fmtNum(total) + ' resultado' + (total > 1 ? 's' : '') : 'Nada encontrado') + '</h2>' +
+      (total > 60 ? '<p class="vazio" style="padding:0 0 6px">Mostrando 60' + (pos ? ' (mais próximos)' : '') + '. Refine a busca.</p>' : '') +
+      (total ? '<ul class="resultados">' + lista + '</ul>' : '<p class="vazio">Tente o nome do morador, da fazenda, da estrada, da localidade ou uma placa.</p>'), 'busca');
+  }
+
+  /* ================================================================ */
+  /* GPS                                                               */
+  /* ================================================================ */
+  $('#btn-gps').addEventListener('click', function () {
+    if (E.gps.watch === null) iniciarGps();
+    else if (!E.gps.seguir) {
+      E.gps.seguir = true;
+      if (E.gps.pos) E.mapa.setView([E.gps.pos.lat, E.gps.pos.lon], Math.max(E.mapa.getZoom(), 15));
+      atualizarBotaoGps();
+    } else pararGps();
+  });
+  function iniciarGps() {
+    if (!('geolocation' in navigator)) { toast('Este aparelho não oferece localização.'); return; }
+    E.gps.seguir = true; E.gps.primeira = true;
+    toast('Buscando sinal de GPS…');
+    E.gps.watch = navigator.geolocation.watchPosition(function (pos) {
+      var c = pos.coords, ll = [c.latitude, c.longitude];
+      E.gps.pos = { lat: c.latitude, lon: c.longitude, precisao: c.accuracy };
+      if (!E.gps.marcador) {
+        E.gps.precisao = L.circle(ll, { radius: c.accuracy, color: '#1e88e5', weight: 1, fillColor: '#1e88e5', fillOpacity: 0.12, interactive: false }).addTo(E.mapa);
+        E.gps.marcador = L.marker(ll, { icon: L.divIcon({ className: '', html: '<div class="minha-pos"></div>', iconSize: [18, 18], iconAnchor: [9, 9] }),
+                                        interactive: false, keyboard: false, zIndexOffset: 1000 }).addTo(E.mapa);
+      } else { E.gps.marcador.setLatLng(ll); E.gps.precisao.setLatLng(ll).setRadius(c.accuracy); }
+      if (E.gps.seguir) E.mapa.setView(ll, E.gps.primeira ? Math.max(E.mapa.getZoom(), 15) : E.mapa.getZoom(), { animate: !E.gps.primeira });
+      if (E.gps.primeira) { E.gps.primeira = false; toast('Localização encontrada (precisão de ' + Math.round(c.accuracy) + ' m).'); }
+      atualizarBotaoGps();
+    }, function (err) {
+      toast(err.code === 1 ? 'Permita o acesso à localização nas configurações do navegador.' : 'Não foi possível obter a localização. Tente em local aberto.', { duracao: 6000 });
+      if (err.code === 1) pararGps();
+    }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
+    atualizarBotaoGps();
+  }
+  function pararGps() {
+    if (E.gps.watch !== null) navigator.geolocation.clearWatch(E.gps.watch);
+    E.gps.watch = null; E.gps.seguir = false; E.gps.pos = null;
+    if (E.gps.marcador) { E.mapa.removeLayer(E.gps.marcador); E.gps.marcador = null; }
+    if (E.gps.precisao) { E.mapa.removeLayer(E.gps.precisao); E.gps.precisao = null; }
+    atualizarBotaoGps();
+  }
+  function atualizarBotaoGps() {
+    var b = $('#btn-gps');
+    b.classList.toggle('ativo', E.gps.watch !== null && !E.gps.seguir);
+    b.classList.toggle('seguindo', E.gps.watch !== null && E.gps.seguir);
+  }
+
+  /* ================================================================ */
+  /* Camadas e menu                                                    */
+  /* ================================================================ */
+  function opcaoCamada(nome, rotulo, amostra, qtd) {
+    return '<label class="opcao"><input type="checkbox" data-camada="' + nome + '" ' + (camadaLigada(nome) ? 'checked' : '') + '>' +
+      amostra + rotulo + '<span class="qtd">' + (qtd === '' ? '' : fmtNum(qtd)) + '</span></label>';
+  }
+  $('#btn-camadas').addEventListener('click', function () {
+    var contagem = {};
+    E.ends.forEach(function (e) { contagem[e.especie] = (contagem[e.especie] || 0) + 1; });
+    var especies = Object.keys(contagem).sort(function (a, b) { return contagem[b] - contagem[a]; });
+    var nValE = E.ends.filter(function (e) { return e.validado; }).length, nValP = E.props.filter(function (p) { return p.validado; }).length;
+    var html = '<h2>Camadas</h2><h3>Fundo do mapa</h3><div class="segmentado">' +
+      [['mapa', 'Mapa'], ['satelite', 'Satélite'], ['nenhum', 'Sem fundo']].map(function (b) {
+        return '<button data-base="' + b[0] + '" class="' + (E.baseAtual === b[0] ? 'ativo' : '') + '">' + b[1] + '</button>';
+      }).join('') + '</div><p class="vazio" style="font-size:.82rem">O fundo precisa de internet. O restante funciona sem sinal.</p>' +
+      '<h3>Mostrar</h3><div class="opcoes">' +
+      opcaoCamada('props', 'Propriedades rurais (CAR)', '<span class="marca-prop mini" style="background:' + COR_PROP.NAO_VALIDADO + '"></span>', E.props.length) +
+      opcaoCamada('ends', 'Endereços', '<span class="bolinha" style="background:' + COR_SITUACAO.NAO_VALIDADO + '"></span>', E.ends.length) +
+      opcaoCamada('vias', 'Trechos de via (IBGE)', '<span class="linha-amostra"></span>', E.vias.length) +
+      opcaoCamada('pontos', 'Pontos de interesse', '<span class="marca-ponto mini" style="background:#3f51b5">P</span>', E.pontos.length) +
+      opcaoCamada('redes', 'Redes de Proteção Preventiva', '<span class="amostra-rede"></span>', E.redes.length) +
+      opcaoCamada('limites', 'Limites dos municípios', '<span class="linha-amostra limite"></span>', Object.keys(E.bases).length) + '</div>' +
+      '<p class="dica">Os limites das propriedades aparecem ao aproximar o mapa.</p>' +
+      '<h3>Situação</h3><div class="opcoes">' +
+      [['VALIDADO', 'Validados (conferidos em campo)', nValE + nValP], ['NAO_VALIDADO', 'Não validados', E.ends.length + E.props.length - nValE - nValP]].map(function (s) {
+        return '<label class="opcao"><input type="checkbox" data-situacao="' + s[0] + '" ' + (E.prefs.ocultasSituacao.indexOf(s[0]) === -1 ? 'checked' : '') +
+          '><span class="bolinha' + (s[0] === 'VALIDADO' ? ' bolinha-val' : '') + '" style="background:' + COR_SITUACAO[s[0]] + '"></span>' + s[1] +
+          '<span class="qtd">' + fmtNum(s[2]) + '</span></label>';
+      }).join('') + '</div>' +
+      '<h3>Colorir endereços por</h3><div class="segmentado seg2">' + [['situacao', 'Situação'], ['tipo', 'Tipo']].map(function (b) {
+        return '<button data-colorir="' + b[0] + '" class="' + (E.prefs.colorir === b[0] ? 'ativo' : '') + '">' + b[1] + '</button>';
+      }).join('') + '</div>' +
+      '<h3>Tipo de endereço</h3><div class="opcoes">' + especies.map(function (e) {
+        return '<label class="opcao"><input type="checkbox" data-especie="' + esc(e) + '" ' + (E.prefs.ocultas.indexOf(e) === -1 ? 'checked' : '') +
+          '><span class="bolinha" style="background:' + (CORES_ESPECIE[e] || COR_PADRAO) + '"></span>' + esc(e) + '<span class="qtd">' + fmtNum(contagem[e]) + '</span></label>';
+      }).join('') + '</div>';
+    abrirPainel(html, 'camadas');
+  });
+
+  $('#painel-conteudo').addEventListener('change', function (ev) {
+    var el = ev.target;
+    if (el.hasAttribute('data-especie') || el.hasAttribute('data-situacao')) {
+      var chave = el.hasAttribute('data-especie') ? 'ocultas' : 'ocultasSituacao';
+      var e = el.getAttribute('data-especie') || el.getAttribute('data-situacao');
+      E.prefs[chave] = E.prefs[chave].filter(function (x) { return x !== e; });
+      if (!el.checked) E.prefs[chave].push(e);
+      LS.set('prefs', E.prefs);
+      aplicarVisibilidade();
+    } else if (el.hasAttribute('data-camada')) {
+      ligarCamada(el.getAttribute('data-camada'), el.checked);
+    }
+  });
+  $('#painel-conteudo').addEventListener('click', function (ev) {
+    var c = ev.target.closest('[data-colorir]');
+    if (c) {
+      E.prefs.colorir = c.getAttribute('data-colorir'); LS.set('prefs', E.prefs);
+      var r = raioAtual();
+      E.ends.forEach(function (e) { if (e.marcador) e.marcador.setStyle(estiloEnd(e, r)); });
+      Array.prototype.forEach.call(document.querySelectorAll('[data-colorir]'), function (x) { x.classList.toggle('ativo', x === c); });
+      return;
+    }
+    var b = ev.target.closest('[data-base]');
+    if (!b) return;
+    trocarBase(b.getAttribute('data-base'));
+    Array.prototype.forEach.call(document.querySelectorAll('[data-base]'), function (x) { x.classList.toggle('ativo', x === b); });
+  });
+
+  $('#btn-menu').addEventListener('click', function () {
+    var u = (E.sessao && E.sessao.usuario) || {};
+    var nValE = E.ends.filter(function (e) { return e.validado; }).length, nValP = E.props.filter(function (p) { return p.validado; }).length;
+    function pct(a, b) { return b ? (100 * a / b).toFixed(1).replace('.', ',') + '%' : '0%'; }
+    var munis = E.municipios.map(function (m) {
+      return '<li' + (E.bases[m.cod] ? '' : ' class="fora"') + '>' + esc(m.nome) + (E.bases[m.cod] ? '' : (m.v ? ' <small>(não baixado)</small>' : ' <small>(sem base)</small>')) + '</li>';
+    }).join('');
+    var html = '<h2>' + esc([u.postoGrad, u.nome].filter(Boolean).join(' ') || 'Usuário') + '</h2>' +
+      '<p class="vazio" style="padding:0">' + esc(u.usuario || '') + ' · ' + esc(u.unidade || u.perfil || '') + '</p>' +
+      (E.fila.length ? '<div class="alerta">' + E.fila.length + ' envio(s) aguardando internet. Sobem sozinhos quando houver sinal.</div>' : '') +
+      '<h3>Área de atuação (' + E.municipios.length + ' município' + (E.municipios.length === 1 ? '' : 's') + ')</h3><ul class="lista-munis">' + munis + '</ul>' +
+      '<h3>Andamento</h3>' +
+      '<div class="info-linha"><span>Propriedades validadas</span><span>' + fmtNum(nValP) + ' de ' + fmtNum(E.props.length) + ' (' + pct(nValP, E.props.length) + ')</span></div>' +
+      '<div class="info-linha"><span>Endereços validados</span><span>' + fmtNum(nValE) + ' de ' + fmtNum(E.ends.length) + ' (' + pct(nValE, E.ends.length) + ')</span></div>' +
+      '<div class="info-linha"><span>Dados atualizados em</span><span>' + fmtDataHora(E.sincronizadoEm) + '</span></div>' +
+      '<div class="info-linha"><span>Acesso válido até</span><span>' + fmtDataHora(E.sessao && E.sessao.expira) + '</span></div>' +
+      '<div class="menu-acoes">' + (E.municipios.length > 1 ? '<button class="btn btn-secundario" data-menu="municipios"' + (navigator.onLine ? '' : ' disabled') +
+        '>Municípios neste aparelho (' + Object.keys(E.bases).length + ' de ' + E.municipios.length + ')</button>' : '') +
+      (String(u.perfil).toUpperCase() === 'ADMIN' ? '<button class="btn btn-secundario" data-menu="redes">Sugerir Redes de Proteção Preventiva</button>' : '') +
+      (String(u.perfil).toUpperCase() === 'ADMIN' ? '<button class="btn btn-secundario" data-menu="usuarios"' + (navigator.onLine ? '' : ' disabled') + '>Usuários (cadastro e senhas)</button>' : '') +
+      '<button class="btn btn-primario" data-menu="sync"' + (navigator.onLine ? '' : ' disabled') + '>' +
+      (E.fila.length ? 'Enviar pendentes e atualizar' : 'Atualizar dados agora') + '</button>' +
+      '<button class="btn btn-perigo" data-menu="sair">Sair e apagar dados do aparelho</button></div>' +
+      '<h3>Dicas</h3><p class="dica">Toque e segure no mapa para cadastrar um endereço, uma propriedade sem CAR ou um ponto de interesse naquele local. ' +
+      'Aproxime o mapa para ver os limites das propriedades.</p>' +
+      '<p class="vazio" style="font-size:.8rem;margin-top:12px">Patrulha Rural · versão ' + VERSAO_APP + '</p>';
+    abrirPainel(html, 'menu');
+  });
+  $('#painel-conteudo').addEventListener('click', function (ev) {
+    var b = ev.target.closest('[data-menu]');
+    if (!b) return;
+    if (b.getAttribute('data-menu') === 'sync') { fecharPainel(); sincronizar(false); }
+    if (b.getAttribute('data-menu') === 'municipios') abrirEscolhaMunicipios(false);
+    if (b.getAttribute('data-menu') === 'usuarios') abrirUsuarios();
+    if (b.getAttribute('data-menu') === 'redes') abrirParametrosRede();
+    if (b.getAttribute('data-menu') === 'sair') {
+      if (confirm(E.fila.length ? 'ATENÇÃO: ' + E.fila.length + ' envio(s) ainda não enviados serão PERDIDOS. Sair mesmo assim?'
+                                : 'Sair? Os dados baixados serão apagados deste aparelho.')) sair();
+    }
+  });
+
+
+
+  /* ================================================================ */
+  /* Redes de Proteção Preventiva: sugestão automática por proximidade  */
+  /* (Instrução 3.03.08/2022, 5ª fase). O ADMIN aprova ou descarta.     */
+  /* ================================================================ */
+  var SUG = { lista: [], isolados: [], param: null, mun: null };
+  var COR_REDE = '#7b1fa2', COR_SUG = '#e65100';
+  var TIPOS_REDE = [['Domicílio particular', 'Domicílios'], ['Estabelecimento agropecuário', 'Estabelecimentos agropecuários'], ['OUTROS', 'Outros (escola, igreja, saúde…)']];
+  var PARAM_REDE = Object.assign({ min: 5, max: 25, vizinho: 800, raio: 2000, tipos: ['Domicílio particular', 'Estabelecimento agropecuário'] }, LS.get('paramRede') || {});
+
+  function montarRedes() {
+    E.redes = objetos(E.campo.redes || { cols: ['ID'], rows: [] }).filter(function (r) {
+      return String(r.STATUS).toUpperCase() === 'ATIVA' && E.bases[r.COD_MUNICIPIO];
+    }).map(function (r) {
+      var rede = { tipo: 'REDE', id: r.ID, mun: r.COD_MUNICIPIO, nome: r.NOME, nomeLocal: r.NOME_LOCAL, d: r,
+                   ids: String(r.ENDERECOS || '').split(';').filter(Boolean),
+                   lat: numero(r.CENTRO_LAT), lon: numero(r.CENTRO_LON), raio: numero(r.RAIO_M) || 0 };
+      rede.ids.forEach(function (id) { E.redePorEnd[id] = rede; });
+      return rede;
+    });
+  }
+  function projetor(lat0) {
+    var kx = Math.cos(lat0 * Math.PI / 180) * 111320, ky = 110540;
+    return { x: function (lon) { return lon * kx; }, y: function (lat) { return lat * ky; },
+             lon: function (x) { return x / kx; }, lat: function (y) { return y / ky; } };
+  }
+  /** Contorno (casca convexa com folga) de um conjunto de endereços, em [lat, lon]. */
+  function contorno(pts, folga) {
+    if (!pts.length) return [];
+    var P = projetor(pts[0].lat);
+    var xy = pts.map(function (p) { return [P.x(p.lon), P.y(p.lat)]; });
+    var cx = 0, cy = 0; xy.forEach(function (q) { cx += q[0]; cy += q[1]; }); cx /= xy.length; cy /= xy.length;
+    var casca;
+    var unicos = {}; xy.forEach(function (q) { unicos[Math.round(q[0]) + ',' + Math.round(q[1])] = q; });
+    var u = Object.keys(unicos).map(function (k) { return unicos[k]; });
+    if (u.length < 3) {
+      var r0 = 0; u.forEach(function (q) { r0 = Math.max(r0, Math.hypot(q[0] - cx, q[1] - cy)); });
+      casca = []; for (var a = 0; a < 16; a++) casca.push([cx + (r0 + folga) * Math.cos(a * Math.PI / 8), cy + (r0 + folga) * Math.sin(a * Math.PI / 8)]);
+    } else {
+      u.sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+      var cruz = function (o, a, b) { return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]); };
+      var baixo = [], cima = [];
+      u.forEach(function (q) { while (baixo.length >= 2 && cruz(baixo[baixo.length - 2], baixo[baixo.length - 1], q) <= 0) baixo.pop(); baixo.push(q); });
+      for (var i = u.length - 1; i >= 0; i--) { var q = u[i]; while (cima.length >= 2 && cruz(cima[cima.length - 2], cima[cima.length - 1], q) <= 0) cima.pop(); cima.push(q); }
+      casca = baixo.slice(0, -1).concat(cima.slice(0, -1)).map(function (q) {
+        var dx = q[0] - cx, dy = q[1] - cy, d = Math.hypot(dx, dy) || 1;
+        return [q[0] + dx / d * folga, q[1] + dy / d * folga];
+      });
+    }
+    return casca.map(function (q) { return [P.lat(q[1]), P.lon(q[0])]; });
+  }
+  function desenharRedes() {
+    E.redes.forEach(function (r) {
+      var pts = r.ids.map(function (id) { return E.endPorId[id]; }).filter(Boolean);
+      if (!pts.length) return;
+      var pol = L.polygon(contorno(pts, 120), { renderer: E.render, color: COR_REDE, weight: 2, opacity: 0.85, fillColor: COR_REDE, fillOpacity: 0.07 });
+      pol.on('click', function (ev) { L.DomEvent.stopPropagation(ev); abrirFichaRede(r); });
+      E.g.redes.addLayer(pol);
+    });
+  }
+  function abrirFichaRede(r) {
+    var pts = r.ids.map(function (id) { return E.endPorId[id]; }).filter(Boolean);
+    var admin = String(((E.sessao || {}).usuario || {}).perfil).toUpperCase() === 'ADMIN';
+    var visitados = pts.filter(function (e) { return e.d.DATA_ULTIMA_VISITA; }).length;
+    var html = '<p class="ficha-tipo"><span class="amostra-rede"></span>Rede de Proteção Preventiva</p><h2>' + esc(r.nome) + '</h2>' +
+      (r.nomeLocal ? '<p class="vazio" style="padding:0">Nome local: ' + esc(r.nomeLocal) + ' <small class="nao-oficial">não oficial</small></p>' : '') +
+      grupo('Resumo', campo('Município', esc(nomeMunicipio(r.mun))) + campo('Endereços', fmtNum(r.ids.length)) +
+        campo('Aderiram', fmtNum(pts.filter(function (e) { return adesaoDe(e, r) === 'ADERIU'; }).length) + ' · não querem ' +
+          fmtNum(pts.filter(function (e) { return adesaoDe(e, r) === 'NAO_QUER'; }).length)) +
+        campo('Grupo WhatsApp', esc(textoGrupo(r.d)) + (r.d.GRUPO_CONTATO ? '<br>' + tel(r.d.GRUPO_CONTATO) : '')) +
+        campo('Já visitados', fmtNum(visitados) + ' de ' + fmtNum(pts.length)) + campo('Raio', fmtDist(r.raio)) +
+        campo('Aprovada por', esc(r.d.CRIADO_POR) + ' em ' + esc(fmtDataHora(r.d.CRIADO_EM)))) +
+      '<h3>Integrantes</h3><ul class="resultados">' + pts.slice(0, 60).map(function (e) {
+        var ad = adesaoDe(e, r);
+        return '<li><button class="resultado" data-abrir-end="' + esc(e.id) + '"><span class="marca-adesao ' + (ad ? 'a-' + ad.toLowerCase() : 'a-pendente') + '"></span>' +
+          '<span class="txt"><span class="t1">' + esc(e.titulo) + '</span><span class="t2">' + esc([e.endereco, e.d.LOCALIDADE].filter(Boolean).join(' · ')) + '</span></span></button></li>';
+      }).join('') + '</ul>' + (pts.length > 60 ? '<p class="dica">… e mais ' + (pts.length - 60) + '.</p>' : '') +
+      (admin ? '<div class="acoes"><button class="btn btn-perigo-leve largo" data-rede-remover="' + esc(r.id) + '">Desfazer esta rede</button></div>' : '') +
+      '<p class="rodape-ficha">ID ' + esc(r.id) + '</p>';
+    abrirPainel(html, 'ficha-rede');
+  }
+
+  function abrirParametrosRede() {
+    var munis = E.municipios.filter(function (m) { return E.bases[m.cod]; });
+    if (!munis.length) { toast('Nenhum município baixado neste aparelho.'); return; }
+    var c0 = E.mapa.getCenter(), aqui = municipioEm(c0.lat, c0.lng);
+    var atual = SUG.mun || (aqui && E.bases[aqui] ? aqui : munis[0].cod);
+    var p = PARAM_REDE;
+    var html = '<h2>Sugerir Redes de Proteção</h2>' +
+      '<p class="dica">O sistema agrupa os endereços vizinhos que ainda não estão em nenhuma rede. Você ajusta os limites, confere no mapa e aprova ou descarta cada sugestão.</p>' +
+      '<form data-form="rede-param" novalidate>' +
+      '<label class="campo">Município<select name="mun">' + munis.map(function (m) {
+        return '<option value="' + esc(m.cod) + '"' + (m.cod === atual ? ' selected' : '') + '>' + esc(m.nome) + '</option>'; }).join('') + '</select></label>' +
+      '<div class="grade2">' +
+      '<label class="campo">Mínimo de endereços<input type="number" name="min" min="2" max="100" value="' + p.min + '" inputmode="numeric"></label>' +
+      '<label class="campo">Máximo de endereços<input type="number" name="max" min="3" max="300" value="' + p.max + '" inputmode="numeric"></label>' +
+      '<label class="campo">Distância entre vizinhos (m)<input type="number" name="vizinho" min="100" max="5000" step="50" value="' + p.vizinho + '" inputmode="numeric"></label>' +
+      '<label class="campo">Raio máximo da rede (m)<input type="number" name="raio" min="300" max="20000" step="100" value="' + p.raio + '" inputmode="numeric"></label></div>' +
+      '<p class="dica" style="margin-top:-4px">Vizinhos: dois endereços a menos desta distância podem ficar na mesma rede. Raio: distância máxima do centro da rede até o endereço mais afastado.</p>' +
+      '<div class="campo"><span>Incluir</span><div class="chips">' + TIPOS_REDE.map(function (t) {
+        return '<label class="chip"><input type="checkbox" name="tipos" value="' + esc(t[0]) + '"' + (p.tipos.indexOf(t[0]) !== -1 ? ' checked' : '') + '><span>' + esc(t[1]) + '</span></label>';
+      }).join('') + '</div></div>' +
+      '<p class="erro" data-erro></p><div class="acoes"><button type="button" class="btn btn-secundario" data-acao="cancelar">Fechar</button>' +
+      '<button type="submit" class="btn btn-primario">Calcular sugestões</button></div></form>' +
+      (SUG.lista.length ? '<div class="menu-acoes"><button class="btn btn-secundario" data-sug-lista>Ver as ' + SUG.lista.length + ' sugestões calculadas</button>' +
+        '<button class="btn btn-secundario" data-sug-limpar>Limpar sugestões do mapa</button></div>' : '');
+    abrirPainel(html, 'form-rede');
+  }
+  function lerParametros(form) {
+    var v = F.ler(form);
+    var p = { min: Math.round(Number(v.min)), max: Math.round(Number(v.max)), vizinho: Math.round(Number(v.vizinho)), raio: Math.round(Number(v.raio)),
+              tipos: listaDe(v.tipos) };
+    if (!(p.min >= 2 && p.min <= 100)) throw new Error('Mínimo de endereços: entre 2 e 100.');
+    if (!(p.max >= p.min && p.max <= 300)) throw new Error('Máximo de endereços: entre o mínimo e 300.');
+    if (!(p.vizinho >= 100 && p.vizinho <= 5000)) throw new Error('Distância entre vizinhos: entre 100 e 5.000 m.');
+    if (!(p.raio >= 300 && p.raio <= 20000)) throw new Error('Raio máximo: entre 300 e 20.000 m.');
+    if (!p.tipos.length) throw new Error('Marque pelo menos um tipo de endereço.');
+    return { p: p, mun: v.mun };
+  }
+  function calcularSugestoes(form) {
+    var lp = lerParametros(form);
+    PARAM_REDE = lp.p; LS.set('paramRede', PARAM_REDE);
+    var r = agruparEnderecos(lp.mun, lp.p);
+    SUG.lista = r.grupos; SUG.isolados = r.isolados; SUG.param = lp.p; SUG.mun = lp.mun; SUG.total = r.total;
+    desenharSugestoes();
+    if (SUG.lista.length) {
+      var b = L.latLngBounds([]); SUG.lista.forEach(function (g) { b.extend(g.contorno); });
+      E.mapa.fitBounds(b, { padding: [30, 30] });
+    }
+    listarSugestoes();
+  }
+
+  /** Agrupamento: componentes por distância entre vizinhos, depois divisão (2-médias) até caber no máximo e no raio. */
+  function agruparEnderecos(mun, p) {
+    var outros = p.tipos.indexOf('OUTROS') !== -1;
+    var pts = E.ends.filter(function (e) {
+      if (e.mun !== mun || e.excluido || E.redePorEnd[e.id]) return false;
+      return p.tipos.indexOf(e.especie) !== -1 || (outros && e.especie !== 'Domicílio particular' && e.especie !== 'Estabelecimento agropecuário');
+    });
+    if (!pts.length) return { grupos: [], isolados: [], total: 0 };
+    var P = projetor(pts[0].lat);
+    pts.forEach(function (e) { e._x = P.x(e.lon); e._y = P.y(e.lat); });
+    // 1) componentes conexos (grade com célula = distância entre vizinhos)
+    var pai = pts.map(function (_, i) { return i; });
+    function raiz(i) { while (pai[i] !== i) { pai[i] = pai[pai[i]]; i = pai[i]; } return i; }
+    var L2 = p.vizinho * p.vizinho, grade = {};
+    pts.forEach(function (e, i) {
+      var cx = Math.floor(e._x / p.vizinho), cy = Math.floor(e._y / p.vizinho);
+      for (var a = -1; a <= 1; a++) for (var b = -1; b <= 1; b++) {
+        (grade[(cx + a) + ':' + (cy + b)] || []).forEach(function (j) {
+          var dx = e._x - pts[j]._x, dy = e._y - pts[j]._y;
+          if (dx * dx + dy * dy <= L2) { var ri = raiz(i), rj = raiz(j); if (ri !== rj) pai[ri] = rj; }
+        });
+      }
+      (grade[cx + ':' + cy] = grade[cx + ':' + cy] || []).push(i);
+    });
+    var comp = {};
+    pts.forEach(function (e, i) { var r = raiz(i); (comp[r] = comp[r] || []).push(e); });
+    // 2) divide os grandes demais
+    function centro(g) { var x = 0, y = 0; g.forEach(function (e) { x += e._x; y += e._y; }); return [x / g.length, y / g.length]; }
+    function raioDe(g, c) { var m = 0; g.forEach(function (e) { m = Math.max(m, Math.hypot(e._x - c[0], e._y - c[1])); }); return m; }
+    function dividir(g) {
+      var c = centro(g);
+      if (g.length <= p.max && raioDe(g, c) <= p.raio) return [g];
+      var a = g[0], dm = -1;
+      g.forEach(function (e) { var d = Math.hypot(e._x - c[0], e._y - c[1]); if (d > dm) { dm = d; a = e; } });
+      var b = a; dm = -1;
+      g.forEach(function (e) { var d = Math.hypot(e._x - a._x, e._y - a._y); if (d > dm) { dm = d; b = e; } });
+      var ca = [a._x, a._y], cb = [b._x, b._y], ga = [], gb = [];
+      for (var it = 0; it < 10; it++) {
+        ga = []; gb = [];
+        g.forEach(function (e) { (Math.hypot(e._x - ca[0], e._y - ca[1]) <= Math.hypot(e._x - cb[0], e._y - cb[1]) ? ga : gb).push(e); });
+        if (!ga.length || !gb.length) break;
+        ca = centro(ga); cb = centro(gb);
+      }
+      if (!ga.length || !gb.length) { // pontos coincidentes: corta pela metade
+        var o = g.slice().sort(function (x, y) { return x._x - y._x || x._y - y._y; });
+        ga = o.slice(0, Math.ceil(o.length / 2)); gb = o.slice(Math.ceil(o.length / 2));
+      }
+      return dividir(ga).concat(dividir(gb));
+    }
+    var grupos = [];
+    Object.keys(comp).forEach(function (k) { grupos = grupos.concat(dividir(comp[k])); });
+    // 3) pequenos: tenta juntar ao grupo vizinho se couber; senão ficam isolados
+    var validos = grupos.filter(function (g) { return g.length >= p.min; });
+    var pequenos = grupos.filter(function (g) { return g.length < p.min; });
+    var isolados = [];
+    pequenos.forEach(function (g) {
+      var c = centro(g), melhor = null, dm = Infinity;
+      validos.forEach(function (v) {
+        if (v.length + g.length > p.max) return;
+        var cv = centro(v);
+        if (Math.hypot(cv[0] - c[0], cv[1] - c[1]) > p.raio + p.vizinho) return;
+        var d = Infinity;
+        g.forEach(function (e) { v.forEach(function (f) { d = Math.min(d, Math.hypot(e._x - f._x, e._y - f._y)); }); });
+        if (d <= p.vizinho && d < dm) { var u = v.concat(g); if (raioDe(u, centro(u)) <= p.raio) { dm = d; melhor = v; } }
+      });
+      if (melhor) Array.prototype.push.apply(melhor, g); else isolados = isolados.concat(g);
+    });
+    var nomesUsados = {};
+    var lista = validos.map(function (g) {
+      var c = centro(g), cont = {};
+      g.forEach(function (e) { var l = String(e.d.LOCALIDADE || '').trim(); if (l) cont[l] = (cont[l] || 0) + 1; });
+      var locs = Object.keys(cont).sort(function (a, b) { return cont[b] - cont[a]; });
+      var props = {}; g.forEach(function (e) { if (e.idProp) props[e.idProp] = true; });
+      return { ends: g, lat: P.lat(c[1]), lon: P.lon(c[0]), raio: raioDe(g, c), localidades: locs,
+               nProps: Object.keys(props).length, contorno: contorno(g, 120) };
+    }).sort(function (a, b) { return b.ends.length - a.ends.length; });
+    lista.forEach(function (g, i) {
+      var base = g.localidades[0] || ('Rede ' + nomeMunicipio(mun));
+      nomesUsados[base] = (nomesUsados[base] || 0) + 1;
+      g.nomeSugerido = base; g.num = i + 1; g.seq = nomesUsados[base];
+    });
+    lista.forEach(function (g) { if (nomesUsados[g.nomeSugerido] > 1) g.nomeSugerido += ' ' + g.seq; });
+    return { grupos: lista, isolados: isolados, total: pts.length };
+  }
+
+  function desenharSugestoes() {
+    E.g.sugest.clearLayers();
+    SUG.lista.forEach(function (g, i) {
+      var pol = L.polygon(g.contorno, { renderer: E.render, color: COR_SUG, weight: 2, dashArray: '6 5', fillColor: COR_SUG, fillOpacity: 0.1 });
+      pol.bindTooltip(String(g.num), { permanent: true, direction: 'center', className: 'rotulo-sug' });
+      pol.on('click', function (ev) { L.DomEvent.stopPropagation(ev); abrirSugestao(i); });
+      E.g.sugest.addLayer(pol);
+    });
+    SUG.isolados.forEach(function (e) {
+      E.g.sugest.addLayer(L.circleMarker([e.lat, e.lon], { renderer: E.render, radius: 9, color: '#c62828', weight: 2, fill: false, interactive: false }));
+    });
+  }
+  function listarSugestoes() {
+    var p = SUG.param, emRede = 0;
+    SUG.lista.forEach(function (g) { emRede += g.ends.length; });
+    var html = '<h2>Sugestões · ' + esc(nomeMunicipio(SUG.mun)) + '</h2>' +
+      '<p class="vazio" style="padding:0">' + p.min + ' a ' + p.max + ' endereços · vizinhos até ' + fmtDist(p.vizinho) + ' · raio até ' + fmtDist(p.raio) + '</p>' +
+      '<div class="info-linha"><span>Sugestões de rede</span><span><b>' + SUG.lista.length + '</b></span></div>' +
+      '<div class="info-linha"><span>Endereços nas sugestões</span><span>' + fmtNum(emRede) + ' de ' + fmtNum(SUG.total) + '</span></div>' +
+      '<div class="info-linha"><span>Isolados (círculo vermelho no mapa)</span><span>' + fmtNum(SUG.isolados.length) + '</span></div>' +
+      (SUG.isolados.length ? '<p class="dica">Endereços isolados não se encaixam em nenhuma rede com esses limites. Merecem atenção nas visitas: são os mais vulneráveis.</p>' : '') +
+      '<div class="menu-acoes" style="margin-top:8px"><button class="btn btn-secundario" data-menu="redes">Ajustar limites e recalcular</button></div>' +
+      (SUG.lista.length ? '<h3>Toque para conferir e aprovar</h3><ul class="resultados">' + SUG.lista.map(function (g, i) {
+        return '<li><button class="resultado" data-sug-abrir="' + i + '"><span class="num-sug">' + g.num + '</span><span class="txt"><span class="t1">' + esc(g.nomeSugerido) + '</span>' +
+          '<span class="t2">' + g.ends.length + ' endereços · raio ' + fmtDist(g.raio) + (g.nProps ? ' · ' + g.nProps + ' imóveis CAR' : '') + '</span></span></button></li>';
+      }).join('') + '</ul>' : '<p class="vazio">Nenhum grupo atende a esses limites. Aumente a distância entre vizinhos ou diminua o mínimo de endereços.</p>');
+    abrirPainel(html, 'sugestoes');
+  }
+  function abrirSugestao(i) {
+    var g = SUG.lista[i];
+    if (!g) return;
+    var tipos = {}; g.ends.forEach(function (e) { tipos[e.especie] = (tipos[e.especie] || 0) + 1; });
+    var visit = g.ends.filter(function (e) { return e.d.DATA_ULTIMA_VISITA; }).length;
+    var nomes = [g.nomeSugerido].concat(g.localidades.slice(1));
+    var html = '<p class="ficha-tipo"><span class="num-sug">' + g.num + '</span>Sugestão de Rede de Proteção</p><h2>' + esc(g.nomeSugerido) + '</h2>' +
+      grupo('Resumo', campo('Endereços', fmtNum(g.ends.length)) + campo('Raio', fmtDist(g.raio)) + campo('Imóveis CAR', fmtNum(g.nProps)) +
+        campo('Já visitados', fmtNum(visit)) + campo('Tipos', esc(Object.keys(tipos).map(function (t) { return t + ' (' + tipos[t] + ')'; }).join(', ')))) +
+      '<form data-form="rede-aprovar" data-sug="' + i + '" novalidate>' +
+      '<label class="campo">Nome da rede <small class="oficial">localidade oficial IBGE</small><select name="nome">' + nomes.map(function (n, k) {
+        return '<option' + (k === 0 ? ' selected' : '') + '>' + esc(n) + '</option>'; }).join('') + '</select></label>' +
+      '<label class="campo">Nome local <small class="nao-oficial">não oficial · opcional</small><input name="nomeLocal" maxlength="120" placeholder="Como a comunidade chama"></label>' +
+      '<p class="erro" data-erro></p><div class="acoes"><button type="button" class="btn btn-secundario" data-sug-descartar="' + i + '">Descartar</button>' +
+      '<button type="submit" class="btn btn-primario">Aprovar rede</button></div></form>' +
+      '<div class="menu-acoes"><button class="btn btn-secundario" data-sug-ver="' + i + '">Ver no mapa</button>' +
+      '<button class="btn btn-secundario" data-sug-lista>Voltar à lista</button></div>' +
+      '<h3>Endereços</h3><ul class="resultados">' + g.ends.slice(0, 40).map(function (e) {
+        return '<li><button class="resultado" data-abrir-end="' + esc(e.id) + '"><span class="bolinha" style="background:' + corEnd(e) + '"></span>' +
+          '<span class="txt"><span class="t1">' + esc(e.titulo) + '</span><span class="t2">' + esc([e.endereco, e.d.LOCALIDADE].filter(Boolean).join(' · ')) + '</span></span></button></li>';
+      }).join('') + '</ul>' + (g.ends.length > 40 ? '<p class="dica">… e mais ' + (g.ends.length - 40) + '.</p>' : '');
+    abrirPainel(html, 'sugestao');
+  }
+  function removerSugestao(i) {
+    SUG.lista.splice(i, 1);
+    desenharSugestoes();
+  }
+  function aprovarRede(form) {
+    var i = Number(form.getAttribute('data-sug')), g = SUG.lista[i];
+    if (!g) throw new Error('Sugestão não encontrada. Recalcule.');
+    if (!navigator.onLine) throw new Error('Aprovar uma rede precisa de internet.');
+    var v = F.ler(form), btn = form.querySelector('button[type=submit]'), erro = form.querySelector('[data-erro]');
+    btn.disabled = true; btn.textContent = 'Salvando…';
+    return api('redeSalvar', { token: E.sessao.token, op: 'aprovar', rede: {
+      mun: SUG.mun, nome: v.nome, nomeLocal: v.nomeLocal, lat: g.lat, lon: g.lon, raio: g.raio,
+      enderecos: g.ends.map(function (e) { return e.id; }), parametros: SUG.param } }).then(function (r) {
+      E.campo.redes = E.campo.redes || { cols: ['ID'], rows: [] };
+      var t = E.campo.redes;
+      Object.keys(r.rede).forEach(function (c) { if (t.cols.indexOf(c) === -1) { t.cols.push(c); t.rows.forEach(function (x) { x.push(''); }); } });
+      t.rows.push(t.cols.map(function (c) { return r.rede[c] === undefined ? '' : r.rede[c]; }));
+      IDB.set('campo', E.campo);
+      removerSugestao(i);
+      E.redePorEnd = {}; montarRedes(); E.g.redes.clearLayers(); desenharRedes();
+      toast('Rede "' + v.nome + '" aprovada com ' + g.ends.length + ' endereços.');
+      listarSugestoes();
+    }).catch(function (e) {
+      if (e.sessaoInvalida) return sessaoExpirou(e.message);
+      btn.disabled = false; btn.textContent = 'Aprovar rede'; erro.textContent = e.message;
+    });
+  }
+  $('#painel-conteudo').addEventListener('click', function (ev) {
+    var t = ev.target, b;
+    if ((b = t.closest('[data-sug-abrir]'))) abrirSugestao(Number(b.getAttribute('data-sug-abrir')));
+    else if (t.closest('[data-sug-lista]')) listarSugestoes();
+    else if (t.closest('[data-sug-limpar]')) { SUG.lista = []; SUG.isolados = []; desenharSugestoes(); fecharPainel(); }
+    else if ((b = t.closest('[data-sug-ver]'))) {
+      var g = SUG.lista[Number(b.getAttribute('data-sug-ver'))];
+      fecharPainel(); if (g) E.mapa.fitBounds(L.latLngBounds(g.contorno), { padding: [40, 40] });
+      toast('Toque na área tracejada para aprovar ou descartar.');
+    } else if ((b = t.closest('[data-sug-descartar]'))) {
+      removerSugestao(Number(b.getAttribute('data-sug-descartar'))); toast('Sugestão descartada.'); listarSugestoes();
+    } else if ((b = t.closest('[data-abrir-rede]'))) {
+      var r = E.redes.filter(function (x) { return x.id === b.getAttribute('data-abrir-rede'); })[0]; if (r) abrirFichaRede(r);
+    } else if ((b = t.closest('[data-rede-remover]'))) {
+      if (!confirm('Desfazer esta rede? Os endereços voltam a ficar livres para novas sugestões.')) return;
+      b.disabled = true;
+      api('redeSalvar', { token: E.sessao.token, op: 'remover', id: b.getAttribute('data-rede-remover') }).then(function (r) {
+        var tab = E.campo.redes, iId = tab.cols.indexOf('ID'), iSt = tab.cols.indexOf('STATUS');
+        tab.rows.forEach(function (x) { if (x[iId] === r.id) x[iSt] = 'REMOVIDA'; });
+        IDB.set('campo', E.campo);
+        E.redePorEnd = {}; montarRedes(); E.g.redes.clearLayers(); desenharRedes();
+        fecharPainel(); toast('Rede desfeita.');
+      }).catch(function (e) { if (e.sessaoInvalida) return sessaoExpirou(e.message); b.disabled = false; toast(e.message, { duracao: 6000 }); });
+    }
+  });
+
+
+  /* ---- Rede de Proteção no atendimento ao morador ---- */
+  var ADESAO_TXT = { ADERIU: 'Aderiu à rede', NAO_QUER: 'Não quer participar', NAO_FOI_POSSIVEL: 'Não foi possível conversar' };
+  function adesaoDe(x, rede) { return x && x.d && rede && x.d.REDE_ID === rede.id ? x.d.REDE_ADESAO || '' : ''; }
+  /** Rede do endereço (membro), da propriedade (por um endereço dela) ou rede próxima (para convidar). */
+  function redeDe(x) {
+    if (!x) return null;
+    if (x.tipo === 'END' && x.id && E.redePorEnd[x.id]) return E.redePorEnd[x.id];
+    if (x.tipo === 'PROP' && x.ends) { for (var k = 0; k < x.ends.length; k++) if (E.redePorEnd[x.ends[k].id]) return E.redePorEnd[x.ends[k].id]; }
+    if (x.tipo === 'PROP' && x.d && x.d.REDE_ID) { var rr = E.redes.filter(function (r) { return r.id === x.d.REDE_ID; })[0]; if (rr) return rr; }
+    return null;
+  }
+  function redeProxima(x) {
+    var melhor = null, dm = Infinity;
+    E.redes.forEach(function (r) {
+      if (r.mun !== x.mun || r.lat === null) return;
+      var d = distanciaM(x.lat, x.lon, r.lat, r.lon);
+      if (d <= r.raio + 400 && d < dm) { dm = d; melhor = r; }
+    });
+    return melhor;
+  }
+  function linkRede(rede, x) {
+    if (!rede) return '';
+    var a = adesaoDe(x, rede);
+    return '<button class="link-prop" data-abrir-rede="' + esc(rede.id) + '"><span class="amostra-rede"></span><span>Rede de Proteção: <strong>' + esc(rede.nome) + '</strong>' +
+      '<br><small class="adesao ' + (a ? 'a-' + a.toLowerCase() : 'a-pendente') + '">' + esc(a ? ADESAO_TXT[a] : 'Morador ainda não consultado') + '</small></span> ›</button>';
+  }
+  function membrosRede(rede) {
+    return rede.ids.map(function (id) { return E.endPorId[id]; }).filter(Boolean).map(function (e) {
+      var p = E.propPorId[e.idProp];
+      var nomeProp = p && p.d.NOME_PROPRIEDADE;
+      var partes = [e.d.MORADOR ? nomeProp : '', e.d.NOME_LOCAL, e.endereco, e.d.LOCALIDADE].filter(function (x, k, arr) { return x && arr.indexOf(x) === k; });
+      return { e: e, nome: e.d.MORADOR || nomeProp || 'Morador não cadastrado', local: partes.join(' · '),
+               adesao: adesaoDe(e, rede) };
+    }).sort(function (a, b) { return (b.adesao === 'ADERIU') - (a.adesao === 'ADERIU') || String(a.nome).localeCompare(String(b.nome), 'pt-BR'); });
+  }
+  function textoGrupo(rd) {
+    var g = rd.GRUPO_WHATSAPP;
+    if (g === 'SIM') return 'Sim' + (rd.GRUPO_ADMIN ? ' · adm.: ' + rd.GRUPO_ADMIN : '') + (rd.PM_NO_GRUPO === 'SIM' ? ' · PM no grupo' : '');
+    if (g === 'NAO') return 'Não tem';
+    return 'Não verificado';
+  }
+  function blocoRede(x) {
+    var rede = x.novo ? null : redeDe(x), convite = false;
+    if (!rede) { rede = redeProxima(x); convite = !!rede; }
+    if (!rede) return '';
+    var m = membrosRede(rede), ad = m.filter(function (z) { return z.adesao === 'ADERIU'; }).length, rd = rede.d;
+    var a = adesaoDe(x, rede);
+    var radio = function (nome, ops, val) {
+      return '<div class="seg3' + (ops.length === 2 ? ' seg2' : '') + '">' + ops.map(function (o) {
+        return '<label><input type="radio" name="' + nome + '" value="' + o[0] + '"' + (String(val || '') === o[0] ? ' checked' : '') + '><span>' + o[1] + '</span></label>';
+      }).join('') + '</div>';
+    };
+    return '<div class="bloco-rede" data-rede-bloco>' +
+      '<input type="hidden" name="REDE_ID" value="' + esc(rede.id) + '">' +
+      '<p class="ficha-tipo"><span class="amostra-rede"></span>Rede de Proteção Preventiva' + (convite ? ' · <b>próxima deste local</b>' : '') + '</p>' +
+      '<h3 class="titulo-rede">' + esc(rede.nome) + '</h3>' +
+      '<p class="dica">' + (convite ? 'Este local ainda não faz parte da rede. Apresente a rede ao morador e convide-o a participar.'
+                                    : 'Confirme com o morador: explique a rede e quem a integra.') + '</p>' +
+      '<div class="info-linha"><span>Integrantes</span><span>' + m.length + ' endereços · ' + ad + ' aderiram</span></div>' +
+      '<div class="info-linha"><span>Grupo de WhatsApp</span><span>' + esc(textoGrupo(rd)) + '</span></div>' +
+      '<details class="integrantes"><summary>Ver integrantes (para mostrar ao morador)</summary><ul>' + m.slice(0, 80).map(function (z) {
+        return '<li><span class="marca-adesao ' + (z.adesao ? 'a-' + z.adesao.toLowerCase() : 'a-pendente') + '"></span><span><b>' + esc(z.nome) + '</b>' +
+          (z.local ? '<small>' + esc(z.local) + '</small>' : '') + '</span></li>';
+      }).join('') + '</ul>' + (m.length > 80 ? '<p class="dica">… e mais ' + (m.length - 80) + '.</p>' : '') +
+      '<p class="legenda-adesao"><span class="marca-adesao a-aderiu"></span>aderiu <span class="marca-adesao a-nao_quer"></span>não quer <span class="marca-adesao a-pendente"></span>não consultado</p></details>' +
+      '<div class="campo"><span>Resposta do morador *</span><div class="opcoes">' + Object.keys(ADESAO_TXT).map(function (k) {
+        return '<label class="opcao opcao-form"><input type="radio" name="REDE_ADESAO" value="' + k + '"' + (a === k ? ' checked' : '') + '><span>' +
+          (convite && k === 'ADERIU' ? 'Aceitou entrar na rede' : ADESAO_TXT[k]) + '</span></label>';
+      }).join('') + '</div></div>' +
+      F.caixa('REDE_CIENCIA', 'Informei o morador sobre a rede e quem a integra', !!(x.d && x.d.REDE_CIENCIA_EM && x.d.REDE_ID === rede.id)) +
+      '<div class="campo"><span>Morador está no grupo de WhatsApp da rede?</span>' + radio('REDE_NO_GRUPO', [['SIM', 'Sim'], ['NAO', 'Não'], ['', 'Não sei']], x.d && x.d.REDE_ID === rede.id ? x.d.REDE_NO_GRUPO : '') + '</div>' +
+      '<div class="campo"><span>A rede tem grupo de WhatsApp?</span>' + radio('GRUPO_TEM', [['SIM', 'Sim'], ['NAO', 'Não'], ['NAO_SEI', 'Não sei']], rd.GRUPO_WHATSAPP || '') + '</div>' +
+      '<div class="grupo-detalhe"' + (rd.GRUPO_WHATSAPP === 'SIM' ? '' : ' hidden') + '>' +
+        F.texto('GRUPO_ADMIN', 'Administrador do grupo (nome)', rd.GRUPO_ADMIN || '', 'maxlength="80"') +
+        F.texto('GRUPO_CONTATO', 'Telefone do administrador', rd.GRUPO_CONTATO || '', 'maxlength="20" inputmode="tel"') +
+        '<div class="campo"><span>A PM participa do grupo?</span>' + radio('PM_NO_GRUPO', [['SIM', 'Sim'], ['NAO', 'Não']], rd.PM_NO_GRUPO || '') + '</div>' +
+      '</div></div>';
+  }
+  /** Lê o bloco da rede do formulário, valida e devolve o envio REDE_CONTATO (ou null). Remove os campos de v. */
+  function extrairContatoRede(form, v) {
+    var bloco = form.querySelector('[data-rede-bloco]');
+    var chaves = ['REDE_ID', 'REDE_ADESAO', 'REDE_CIENCIA', 'REDE_NO_GRUPO', 'GRUPO_TEM', 'GRUPO_ADMIN', 'GRUPO_CONTATO', 'PM_NO_GRUPO'];
+    var r = {}; chaves.forEach(function (k) { r[k] = v[k]; delete v[k]; });
+    if (!bloco) return null;
+    if (!r.REDE_ADESAO) { bloco.scrollIntoView({ block: 'start' }); throw new Error('Rede de Proteção: marque a resposta do morador.'); }
+    if (r.REDE_ADESAO !== 'NAO_FOI_POSSIVEL' && !r.REDE_CIENCIA) throw new Error('Rede de Proteção: confirme que informou o morador sobre a rede.');
+    if (r.GRUPO_CONTATO && !/^[\d\s()+-]{8,20}$/.test(r.GRUPO_CONTATO)) throw new Error('Telefone do administrador do grupo inválido.');
+    var x = form.getAttribute('data-form'), tipoAlvo = /^prop/.test(x) || form.getAttribute('data-tipo') === 'PROP' ? 'PROP' : 'END';
+    var item = { tipo: 'REDE_CONTATO', alvoTipo: tipoAlvo, alvoId: form.getAttribute('data-id') || '', redeId: r.REDE_ID,
+                 adesao: r.REDE_ADESAO, ciencia: !!r.REDE_CIENCIA, noGrupo: r.REDE_NO_GRUPO || '' };
+    if (r.GRUPO_TEM) item.grupo = { tem: r.GRUPO_TEM, admin: r.GRUPO_ADMIN || '', contato: r.GRUPO_CONTATO || '', pm: r.PM_NO_GRUPO || '' };
+    return item;
+  }
+  $('#painel-conteudo').addEventListener('change', function (ev) {
+    if (ev.target.name === 'GRUPO_TEM') {
+      var d = ev.target.closest('[data-rede-bloco]').querySelector('.grupo-detalhe');
+      if (d) d.hidden = ev.target.value !== 'SIM';
+    }
+  });
+
+  /* ================================================================ */
+  /* Usuários (somente perfil ADMIN; tudo é conferido no servidor)      */
+  /* ================================================================ */
+  var ADM = null;   // { usuarios, municipios, postos, eu, filtro }
+  function normUnidade(s) {
+    return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+      .replace(/(\d)\s*[ºª°oa]\b/g, '$1').replace(/(\d)\s*[ºª°]/g, '$1').replace(/[^a-z0-9*]/g, '');
+  }
+  var UNIDADES_TODAS_APP = ['18rpm', '*', 'todas', 'regiao'];
+  function areaPrevista(unidade, perfil) {
+    if (!ADM) return [];
+    var us = String(unidade || '').split(';').map(normUnidade).filter(Boolean);
+    var tudo = perfil === 'ADMIN' || us.some(function (x) { return UNIDADES_TODAS_APP.indexOf(x) !== -1; });
+    return ADM.municipios.filter(function (m) {
+      return tudo || us.indexOf(m.cod) !== -1 ||
+        [m.bpm, m.cia, m.pelotao].some(function (x) { return x && us.indexOf(normUnidade(x)) !== -1; });
+    });
+  }
+  function unidadesDisponiveis() {
+    var u = {};
+    (ADM ? ADM.municipios : []).forEach(function (m) { [m.bpm, m.cia, m.pelotao].forEach(function (x) { if (x) u[x] = (u[x] || 0) + 1; }); });
+    return Object.keys(u).sort().map(function (k) { return { nome: k, n: u[k] }; });
+  }
+  function abrirUsuarios() {
+    if (!navigator.onLine) { toast('O cadastro de usuários precisa de internet.'); return; }
+    toast('Carregando usuários…', { duracao: 0 });
+    return api('usuarios', { token: E.sessao.token }).then(function (r) {
+      ADM = { usuarios: r.usuarios, municipios: r.municipios, postos: r.postos, eu: r.eu, filtro: ADM ? ADM.filtro : '' };
+      $('#toast').hidden = true;
+      listarUsuarios();
+    }).catch(function (e) {
+      if (e.sessaoInvalida) return sessaoExpirou(e.message);
+      toast(e.message, { duracao: 6000 });
+    });
+  }
+  function itemUsuario(u) {
+    var selos = (u.perfil === 'ADMIN' ? '<span class="selo ok">ADMIN</span>' : '') +
+      (!u.ativo ? '<span class="selo inativo">inativo</span>' : u.trocarSenha ? '<span class="selo pend">senha provisória</span>' : '');
+    return '<li><button class="resultado" data-usu-abrir="' + esc(u.usuario) + '"><span class="avatar">' + esc((u.nome || u.usuario).charAt(0).toUpperCase()) + '</span>' +
+      '<span class="txt"><span class="t1">' + esc([u.postoGrad, u.nome].filter(Boolean).join(' ') || u.usuario) + selos + '</span>' +
+      '<span class="t2">' + esc(u.usuario) + ' · ' + esc(u.unidade || (u.perfil === 'ADMIN' ? 'toda a área' : 'sem unidade')) + ' · ' +
+      u.nMunicipios + ' mun. · ' + (u.ultimoAcesso ? 'último acesso ' + esc(fmtDataHora(u.ultimoAcesso)) : 'nunca acessou') + '</span></span></button></li>';
+  }
+  function listarUsuarios() {
+    var f = normalizar(ADM.filtro);
+    var lista = ADM.usuarios.filter(function (u) {
+      return !f || normalizar([u.usuario, u.nome, u.postoGrad, u.numeroPm, u.unidade].join(' ')).indexOf(f) !== -1;
+    }).sort(function (a, b) { return (b.ativo - a.ativo) || String(a.nome).localeCompare(String(b.nome), 'pt-BR'); });
+    var html = '<h2>Usuários</h2><p class="vazio" style="padding:0 0 8px">' + ADM.usuarios.length + ' cadastrado(s) · ' +
+      ADM.usuarios.filter(function (u) { return u.ativo; }).length + ' ativo(s)</p>' +
+      '<div class="menu-acoes" style="margin-top:0"><button class="btn btn-primario" data-usu-novo>+ Cadastrar usuário</button></div>' +
+      '<label class="campo"><input type="search" data-usu-filtro placeholder="Filtrar por nome, nº PM ou unidade" value="' + esc(ADM.filtro) + '"></label>' +
+      '<ul class="resultados" data-usu-lista>' + (lista.map(itemUsuario).join('') || '<li class="vazio">Nenhum usuário encontrado.</li>') + '</ul>';
+    abrirPainel(html, 'usuarios');
+  }
+  function textoArea(unidade, perfil) {
+    var a = areaPrevista(unidade, perfil);
+    if (perfil === 'ADMIN') return '<b>Administrador:</b> vê todos os ' + a.length + ' municípios e pode cadastrar usuários.';
+    if (!a.length) return '<span class="erro-txt">Nenhum município corresponde a essa unidade. Toque numa das opções acima.</span>';
+    return '<b>Verá ' + a.length + ' município' + (a.length === 1 ? '' : 's') + ':</b> ' + esc(a.map(function (m) { return m.nome; }).join(', '));
+  }
+  function abrirFormUsuario(u) {
+    var novo = !u;
+    u = u || { usuario: '', nome: '', postoGrad: '', numeroPm: '', perfil: 'USUARIO', unidade: '', ativo: true };
+    var eu = !novo && u.usuario === ADM.eu;
+    var unidades = unidadesDisponiveis();
+    var html = '<h2>' + (novo ? 'Cadastrar usuário' : esc([u.postoGrad, u.nome].filter(Boolean).join(' ') || u.usuario)) + '</h2>' +
+      '<form data-form="usuario" data-novo="' + (novo ? '1' : '') + '" autocomplete="off">' +
+      (novo ? F.texto('usuario', 'Usuário para login (nº PM, sem espaços)', '', 'required minlength="3" maxlength="40" autocapitalize="none" spellcheck="false" inputmode="text" pattern="[A-Za-z0-9._\\-]+"')
+            : '<div class="info-linha"><span>Usuário (login)</span><span><b>' + esc(u.usuario) + '</b></span></div>' +
+              '<input type="hidden" name="usuario" value="' + esc(u.usuario) + '">') +
+      F.texto('nome', 'Nome de guerra / nome', u.nome, 'required maxlength="120"') +
+      F.escolha('postoGrad', 'Posto / graduação', ADM.postos, u.postoGrad) +
+      F.texto('numeroPm', 'Nº PM', u.numeroPm, 'maxlength="20" inputmode="numeric"') +
+      '<div class="campo"><span>Perfil</span><div class="seg3 seg2">' + [['USUARIO', 'Usuário'], ['ADMIN', 'Administrador']].map(function (o) {
+        return '<label><input type="radio" name="perfil" value="' + o[0] + '"' + (u.perfil === o[0] ? ' checked' : '') + (eu ? ' disabled' : '') + '><span>' + o[1] + '</span></label>';
+      }).join('') + '</div>' + (eu ? '<input type="hidden" name="perfil" value="ADMIN">' : '') + '</div>' +
+      '<label class="campo">Unidade (área de atuação)<input name="unidade" data-usu-unidade value="' + esc(u.unidade) + '" maxlength="200" placeholder="Ex.: 163 Cia PM"></label>' +
+      '<div class="chips chips-unidade">' + unidades.map(function (x) {
+        return '<button type="button" class="chip-btn" data-usu-un="' + esc(x.nome) + '">' + esc(x.nome) + ' <small>' + x.n + '</small></button>';
+      }).join('') + '<button type="button" class="chip-btn" data-usu-un="18ª RPM">18ª RPM <small>toda</small></button></div>' +
+      '<p class="dica" style="margin-top:4px">Toque numa unidade para usá-la. Para mais de uma, separe com ";" (ex.: 163 Cia PM; 242 Cia PM).</p>' +
+      '<div class="alerta area-prevista" data-usu-area>' + textoArea(u.unidade, u.perfil) + '</div>' +
+      (novo ? '' : F.caixa('ativo', 'Acesso ativo' + (eu ? ' (você não pode se desativar)' : ''), u.ativo).replace('<input', eu ? '<input disabled' : '<input')) +
+      (novo ? '<p class="dica">Ao salvar, o sistema gera uma <b>senha provisória</b>. O militar troca por uma senha própria no primeiro acesso.</p>' : '') +
+      '<p class="erro" data-erro></p><div class="acoes"><button type="button" class="btn btn-secundario" data-usu-voltar>Voltar</button>' +
+      '<button type="submit" class="btn btn-primario">' + (novo ? 'Cadastrar' : 'Salvar') + '</button></div>' +
+      (novo ? '' : '<div class="menu-acoes"><button type="button" class="btn btn-secundario" data-usu-senha="' + esc(u.usuario) + '">Gerar nova senha provisória</button></div>' +
+        '<p class="dica">Use quando o militar esquecer a senha ou ficar bloqueado. As sessões abertas dele são encerradas.</p>') +
+      '</form>';
+    abrirPainel(html, 'form-usuario');
+  }
+  function salvarUsuario(form) {
+    var erro = form.querySelector('[data-erro]'), btn = form.querySelector('button[type=submit]');
+    var v = F.ler(form), novo = form.getAttribute('data-novo') === '1';
+    var dados = { novo: novo, usuario: String(v.usuario || '').toLowerCase(), nome: v.nome, postoGrad: v.postoGrad, numeroPm: v.numeroPm,
+                  perfil: v.perfil || 'USUARIO', unidade: v.unidade, ativo: novo ? true : v.ativo !== false };
+    var ativoEl = form.querySelector('[name=ativo]');
+    if (ativoEl && ativoEl.disabled) dados.ativo = true;
+    if (!/^[a-z0-9._-]{3,40}$/.test(dados.usuario)) throw new Error('Usuário inválido: de 3 a 40 letras ou números, sem espaços.');
+    if (!dados.nome) throw new Error('Informe o nome.');
+    if (dados.perfil !== 'ADMIN' && !areaPrevista(dados.unidade, dados.perfil).length) throw new Error('Escolha uma unidade válida (toque numa das opções).');
+    btn.disabled = true; btn.textContent = 'Salvando…';
+    return api('usuarioSalvar', { token: E.sessao.token, dados: dados }).then(function (r) {
+      if (r.senha) return mostrarSenha(r.usuario, r.senha, true, r.municipios);
+      toast('Usuário ' + r.usuario + ' atualizado.');
+      return abrirUsuarios();
+    }).catch(function (e) {
+      if (e.sessaoInvalida) return sessaoExpirou(e.message);
+      btn.disabled = false; btn.textContent = novo ? 'Cadastrar' : 'Salvar';
+      erro.textContent = e.message; erro.scrollIntoView({ block: 'center' });
+    });
+  }
+  function mostrarSenha(usuario, senha, novo, municipios) {
+    var endereco = location.origin + location.pathname;
+    var msg = 'Patrulha Rural - acesso\nEndereço: ' + endereco + '\nUsuário: ' + usuario + '\nSenha provisória: ' + senha +
+      '\nNo primeiro acesso o app pede para criar uma senha própria.';
+    var html = '<h2>' + (novo ? 'Usuário cadastrado' : 'Nova senha gerada') + '</h2>' +
+      '<div class="cartao-senha"><div><small>Usuário</small><b>' + esc(usuario) + '</b></div><div><small>Senha provisória</small><b class="senha">' + esc(senha) + '</b></div></div>' +
+      '<div class="alerta perigo">Anote ou envie agora: <b>esta senha não aparece de novo</b>. Entregue só ao próprio militar.</div>' +
+      (municipios && municipios.length ? '<p class="dica">Área: ' + esc(municipios.join(', ')) + '</p>' : '') +
+      '<div class="menu-acoes"><button class="btn btn-primario" data-usu-copiar>Copiar mensagem de acesso</button>' +
+      (navigator.share ? '<button class="btn btn-secundario" data-usu-compartilhar>Enviar (WhatsApp, etc.)</button>' : '') +
+      '<button class="btn btn-secundario" data-usu-lista-voltar>Voltar à lista de usuários</button></div>';
+    abrirPainel(html, 'usuario-senha');
+    ADM._msg = msg;
+  }
+  $('#painel-conteudo').addEventListener('input', function (ev) {
+    var t = ev.target;
+    if (t.hasAttribute('data-usu-filtro')) {
+      ADM.filtro = t.value;
+      var f = normalizar(t.value);
+      var lista = ADM.usuarios.filter(function (u) { return !f || normalizar([u.usuario, u.nome, u.postoGrad, u.numeroPm, u.unidade].join(' ')).indexOf(f) !== -1; });
+      $('[data-usu-lista]').innerHTML = lista.map(itemUsuario).join('') || '<li class="vazio">Nenhum usuário encontrado.</li>';
+    } else if (t.hasAttribute('data-usu-unidade')) {
+      atualizarAreaForm(t.form);
+    }
+  });
+  $('#painel-conteudo').addEventListener('change', function (ev) {
+    if (ev.target.name === 'perfil' && ev.target.form && ev.target.form.getAttribute('data-form') === 'usuario') atualizarAreaForm(ev.target.form);
+  });
+  function atualizarAreaForm(form) {
+    var perfil = (form.querySelector('[name=perfil]:checked') || form.querySelector('[name=perfil]') || {}).value || 'USUARIO';
+    form.querySelector('[data-usu-area]').innerHTML = textoArea(form.querySelector('[name=unidade]').value, perfil);
+  }
+  $('#painel-conteudo').addEventListener('click', function (ev) {
+    var t = ev.target, b;
+    if ((b = t.closest('[data-usu-abrir]'))) {
+      var u = ADM.usuarios.filter(function (x) { return x.usuario === b.getAttribute('data-usu-abrir'); })[0];
+      if (u) abrirFormUsuario(u);
+    } else if (t.closest('[data-usu-novo]')) {
+      abrirFormUsuario(null);
+    } else if ((b = t.closest('[data-usu-un]'))) {
+      var campoUn = b.closest('form').querySelector('[name=unidade]');
+      var atual = listaDe(campoUn.value), nova = b.getAttribute('data-usu-un');
+      var jaTem = atual.some(function (x) { return normUnidade(x) === normUnidade(nova); });
+      campoUn.value = jaTem ? atual.filter(function (x) { return normUnidade(x) !== normUnidade(nova); }).join('; ')
+                            : (normUnidade(nova) === '18rpm' || !atual.length ? nova : atual.concat(nova).join('; '));
+      atualizarAreaForm(b.closest('form'));
+    } else if (t.closest('[data-usu-voltar]') || t.closest('[data-usu-lista-voltar]')) {
+      if (t.closest('[data-usu-lista-voltar]')) abrirUsuarios(); else listarUsuarios();
+    } else if ((b = t.closest('[data-usu-senha]'))) {
+      var alvo = b.getAttribute('data-usu-senha');
+      if (!confirm('Gerar nova senha provisória para ' + alvo + '? A senha atual deixa de valer.')) return;
+      b.disabled = true;
+      api('usuarioSenha', { token: E.sessao.token, usuario: alvo }).then(function (r) {
+        mostrarSenha(r.usuario, r.senha, false);
+      }).catch(function (e) {
+        if (e.sessaoInvalida) return sessaoExpirou(e.message);
+        b.disabled = false; toast(e.message, { duracao: 6000 });
+      });
+    } else if (t.closest('[data-usu-copiar]')) {
+      var texto = ADM._msg;
+      var ok = function () { toast('Mensagem copiada. Cole no WhatsApp ou onde preferir.'); };
+      if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(texto).then(ok, function () { toast(texto, { duracao: 15000 }); });
+      else toast(texto, { duracao: 15000 });
+    } else if (t.closest('[data-usu-compartilhar]')) {
+      navigator.share({ title: 'Patrulha Rural', text: ADM._msg }).catch(function () { /* cancelado */ });
+    }
+  });
+
+  /* ================================================================ */
+  /* Service worker                                                    */
+  /* ================================================================ */
+  function registrarServiceWorker() {
+    if (!('serviceWorker' in navigator)) return;
+    navigator.serviceWorker.register('sw.js').then(function (reg) {
+      reg.addEventListener('updatefound', function () {
+        var novo = reg.installing;
+        if (!novo) return;
+        novo.addEventListener('statechange', function () {
+          if (novo.state === 'installed' && navigator.serviceWorker.controller) {
+            toast('Nova versão do app disponível.', { acao: 'Atualizar', duracao: 0, fn: function () { novo.postMessage('ativar'); } });
+          }
+        });
+      });
+    }).catch(function (e) { console.warn('SW', e); });
+    var haviaControlador = !!navigator.serviceWorker.controller, recarregando = false;
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (recarregando || !haviaControlador) return;
+      recarregando = true; location.reload();
+    });
+  }
+
+  if (location.hostname === 'localhost') { window.__PR = E; window.__PR_montar = montar; }
+  var msgLogin = LS.get('msgLogin');
+  if (msgLogin) { $('#login-erro').textContent = msgLogin; LS.del('msgLogin'); }
+  iniciar();
+})();
