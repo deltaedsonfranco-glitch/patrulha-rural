@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  var VERSAO_APP = '2.4.0';
+  var VERSAO_APP = '2.5.0';
   var C = window.CONFIG || {};
   var MUNICIPIO_V1 = C.MUNICIPIO_V1 || '3151800';
   var ZOOM_POLIGONOS = 13;
@@ -291,11 +291,11 @@
     IDB.del('dados').catch(function () {}); // cópia da versão 1, não é mais usada
     Promise.all([IDB.get('municipios'), IDB.get('campo'), IDB.get('fila'), IDB.get('sincronizadoEm')]).then(function (r) {
       E.municipios = r[0] || [];
-      E.campo = r[1] || CAMPO_VAZIO();
+      E.campo = campoValido(r[1]);
       E.fila = migrarFilaV1(Array.isArray(r[2]) ? r[2] : []);
       E.sincronizadoEm = r[3] || null;
       return Promise.all(E.municipios.map(function (m) {
-        return IDB.get('base_' + m.cod).then(function (b) { if (b) E.bases[m.cod] = b; });
+        return IDB.get('base_' + m.cod).then(function (b) { if (baseValida(b, m.cod)) E.bases[m.cod] = b; else if (b !== undefined) IDB.del('base_' + m.cod); });
       }));
     }).then(function () {
       montar();
@@ -342,7 +342,7 @@
     E.sincronizando = true;
     atualizarStatus();
     if (!silencioso) toast('Atualizando dados…', { duracao: 0 });
-    var baixadas = 0, semBase = [], escolher = false;
+    var baixadas = 0, semBase = [], escolher = false, falhas = [];
     return enviarFila(true).then(function () {
       return api('dados', { token: E.sessao.token });
     }).then(function (r) {
@@ -360,9 +360,13 @@
         cadeia = cadeia.then(function () {
           toast('Baixando ' + m.nome + ' (' + (i + 1) + ' de ' + pendentes.length + ')…', { duracao: 0 });
           return api('base', { token: E.sessao.token, cod: m.cod }, 300000).then(function (rb) {
+            if (!baseValida(rb.base, m.cod)) { falhas.push(m.nome + ' (arquivo da base vazio ou inválido)'); return; }
             E.bases[m.cod] = rb.base;
             baixadas++;
             return IDB.set('base_' + m.cod, rb.base);
+          }).catch(function (e) {
+            if (e.sessaoInvalida) throw e;
+            falhas.push(m.nome + ' (' + e.message + ')');   // segue com os demais municípios
           });
         });
       });
@@ -372,7 +376,7 @@
           if (!sel || !sel[cod]) { delete E.bases[cod]; IDB.del('base_' + cod); }
         });
         E.municipios = lista;
-        E.campo = r.campo;
+        E.campo = campoValido(r.campo);
         E.fila.forEach(function (it) { aplicarItemLocal(it); });
         E.sincronizadoEm = new Date().toISOString();
         return Promise.all([IDB.set('municipios', lista), IDB.set('campo', E.campo), IDB.set('sincronizadoEm', E.sincronizadoEm)]);
@@ -383,7 +387,8 @@
       var msg = 'Dados atualizados: ' + Object.keys(E.bases).length + ' município(s) no aparelho' +
         (baixadas ? ', ' + baixadas + ' base(s) baixada(s)' : '') + '.';
       if (semBase.length) msg += ' Ainda sem base: ' + semBase.join(', ') + '.';
-      toast(msg, { duracao: semBase.length ? 8000 : 4000 });
+      if (falhas.length) msg += ' NÃO baixados: ' + falhas.join('; ') + '.';
+      toast(msg, { duracao: semBase.length || falhas.length ? 12000 : 4000 });
     }).catch(function (e) {
       if (e.sessaoInvalida) return sessaoExpirou(e.message);
       toast('Não foi possível atualizar: ' + e.message, { duracao: 7000 });
@@ -431,6 +436,17 @@
   /* ================================================================ */
   /* Montagem: base do IBGE/CAR + camadas de campo                     */
   /* ================================================================ */
+  /** Base de município utilizável (evita travar o app com arquivo vazio ou corrompido). */
+  function baseValida(b, cod) {
+    return !!(b && typeof b === 'object' && b.enderecos && Array.isArray(b.enderecos.rows) &&
+              b.propriedades && Array.isArray(b.propriedades.rows) && (!b.mun || String(b.mun) === String(cod)));
+  }
+  function campoValido(c) {
+    var v = CAMPO_VAZIO();
+    if (!c || typeof c !== 'object') return v;
+    Object.keys(v).forEach(function (k) { if (!c[k] || !Array.isArray(c[k].rows) || !Array.isArray(c[k].cols)) c[k] = v[k]; });
+    return c;
+  }
   function objetos(tab) {
     if (!tab || !tab.rows) return [];
     return tab.rows.map(function (row) {
@@ -455,8 +471,9 @@
               especie: d.ESPECIE || 'Domicílio particular', validado: String(d.STATUS).toUpperCase() === 'VALIDADO',
               excluido: String(d.STATUS).toUpperCase() === 'EXCLUIDO',
               idProp: (ov && ov.ID_PROPRIEDADE) || (base && base.ID_PROP) || '' };
-    e.titulo = d.NOME_ESTABELECIMENTO || (d.LOGRADOURO ? d.LOGRADOURO + (d.NUMERO && d.NUMERO !== 'SN' ? ', ' + d.NUMERO : '') : '') ||
-               d.NOME_LOCAL || d.LOCALIDADE || e.especie;
+    e.endereco = d.LOGRADOURO ? d.LOGRADOURO + (d.NUMERO && d.NUMERO !== 'SN' ? ', ' + d.NUMERO : (d.NUMERO === 'SN' ? ', s/nº' : '')) : '';
+    e.subtitulo = [e.endereco, d.LOCALIDADE].filter(Boolean).join(' · ');
+    e.titulo = d.MORADOR || d.NOME_ESTABELECIMENTO || d.NOME_LOCAL || e.especie;
     e.busca = normalizar([d.MORADOR, d.NOME_ESTABELECIMENTO, d.NOME_LOCAL, d.LOGRADOURO, d.NUMERO, d.LOCALIDADE, d.CEP, e.especie,
                           d.PLACAS_VEICULOS, String(d.PLACAS_VEICULOS || '').replace(/[\s,]/g, ''), nomeMunicipio(e.mun)].join(' '));
     return e;
@@ -480,6 +497,14 @@
                           'imovel rural propriedade', nomeMunicipio(p.mun)].join(' '));
     return p;
   }
+  /** Título do endereço: morador/responsável; sem ele, a propriedade (se for a sede dela); senão o tipo. */
+  function ajustarTituloEnd(e) {
+    var d = e.d, p = E.propPorId[e.idProp];
+    e.ehSede = !!(p && p.d.SEDE_ENDERECO === e.id);
+    if (d.MORADOR || d.NOME_ESTABELECIMENTO) return;
+    if (e.ehSede) e.titulo = 'Sede · ' + (p.d.NOME_PROPRIEDADE || p.d.PROPRIETARIO || p.titulo);
+    else e.titulo = d.NOME_LOCAL || e.especie;
+  }
   function fmtArea(ha) { ha = Number(ha) || 0; return (ha < 10 ? ha.toFixed(1) : Math.round(ha)).toString().replace('.', ',') + ' ha'; }
 
   function montar() {
@@ -490,6 +515,7 @@
 
     Object.keys(E.bases).forEach(function (cod) {
       var b = E.bases[cod];
+      if (!baseValida(b, cod)) { delete E.bases[cod]; return; }
       objetos(b.propriedades).forEach(function (o) {
         var p = fundirProp(o, ovProp[o.ID], cod);
         usadosProp[o.ID] = true;
@@ -519,6 +545,7 @@
       if (e && !e.excluido) { E.ends.push(e); E.endPorId[e.id] = e; }
     });
     E.ends.forEach(function (e) { var p = E.propPorId[e.idProp]; if (p) p.ends.push(e); });
+    E.ends.forEach(ajustarTituloEnd);
     E.pontos = objetos(E.campo.pontos).filter(function (o) {
       return String(o.STATUS).toUpperCase() !== 'REMOVIDO' && E.bases[o.COD_MUNICIPIO];
     }).map(function (o) { return { tipo: 'PONTO', id: o.ID, mun: o.COD_MUNICIPIO, lat: numero(o.LATITUDE), lon: numero(o.LONGITUDE), d: o }; })
@@ -784,6 +811,10 @@
 
   /** Atualiza só o registro alterado (sem redesenhar milhares de pontos). */
   function refazer(tipo, id) {
+    refazer_(tipo, id);
+    if (tipo === 'PROP' && E.propPorId[id]) E.propPorId[id].ends.forEach(ajustarTituloEnd);
+  }
+  function refazer_(tipo, id) {
     var ov, base, novo, velho;
     if (tipo === 'END') {
       velho = E.endPorId[id];
@@ -803,6 +834,7 @@
         E.ends.push(novo); E.endPorId[id] = novo;
         var pn = E.propPorId[novo.idProp];
         if (pn) pn.ends.push(novo);
+        ajustarTituloEnd(novo);
       }
     } else if (tipo === 'PROP') {
       velho = E.propPorId[id];
@@ -835,21 +867,24 @@
   /* ================================================================ */
   /* Fila de envios (funciona sem sinal)                               */
   /* ================================================================ */
-  function registrar(item, extra) {
+  function registrar(item, extras) {
+    extras = (Array.isArray(extras) ? extras : [extras]).filter(Boolean);
     item.uid = item.uid || novoUid();
     item.feitoEm = new Date().toISOString();
     if (E.gps.pos) item.posicao = { lat: E.gps.pos.lat, lon: E.gps.pos.lon, precisao: E.gps.pos.precisao };
     E.fila.push(item);
-    var alvo = aplicarItemLocal(item);
-    if (extra) {   // envio complementar ligado ao mesmo registro (ex.: contato sobre a Rede de Proteção)
+    var alvo = aplicarItemLocal(item), outros = [];
+    extras.forEach(function (extra) {   // envios complementares do mesmo atendimento (rede, sede da propriedade)
       extra.uid = novoUid(); extra.feitoEm = item.feitoEm; extra.posicao = item.posicao;
       if (!extra.alvoId && alvo) extra.alvoId = alvo.id;
       E.fila.push(extra);
-      aplicarItemLocal(extra);
-    }
-    if (item.tipo === 'REDE_CONTATO' || (extra && extra.tipo === 'REDE_CONTATO')) {
+      var a = aplicarItemLocal(extra);
+      if (a && (!alvo || a.id !== alvo.id || a.tipo !== alvo.tipo)) outros.push(a);
+    });
+    if ([item].concat(extras).some(function (x) { return x.tipo === 'REDE_CONTATO'; })) {
       E.redePorEnd = {}; montarRedes(); E.g.redes.clearLayers(); desenharRedes();
     }
+    outros.forEach(function (a) { refazer(a.tipo, a.id); });
     if (alvo) refazer(alvo.tipo, alvo.id);
     return Promise.all([IDB.set('fila', E.fila), IDB.set('campo', E.campo)]).then(function () {
       atualizarStatus();
@@ -954,6 +989,15 @@
         setar(t, r, Object.assign({ LATITUDE: it.novaPosicao.lat.toFixed(6), LONGITUDE: it.novaPosicao.lon.toFixed(6), STATUS: 'ATIVO' },
                                   it.dados, autoria));
         return { tipo: 'PONTO', id: id };
+      case 'PROP_SEDE':
+        t = tabela('propriedades');
+        r = linha(t, it.alvoId, munDe(it.alvoId), origemDe(it.alvoId));
+        if (it.remover) {
+          if (r[col(t, 'SEDE_ENDERECO')] === it.enderecoId) setar(t, r, Object.assign({ SEDE_ENDERECO: '' },
+            /^CAR-/.test(it.alvoId) ? { LATITUDE: '', LONGITUDE: '', PRECISAO_COORD: '' } : {}));
+        } else setar(t, r, { SEDE_ENDERECO: it.enderecoId, LATITUDE: Number(it.lat).toFixed(6), LONGITUDE: Number(it.lon).toFixed(6), PRECISAO_COORD: 'SEDE_NO_ENDERECO' });
+        setar(t, r, autoria);
+        return { tipo: 'PROP', id: it.alvoId };
       case 'REDE_CONTATO':
         t = tabela(it.alvoTipo === 'END' ? 'enderecos' : 'propriedades');
         r = linha(t, it.alvoId, munDe(it.alvoId), origemDe(it.alvoId));
@@ -1043,7 +1087,8 @@
   function destacar(x) {
     removerDestaque();
     if (x.geom) {
-      E.destaque = L.polygon(paraLatLngs(x.geom), { color: '#00e5ff', weight: 4, fill: false, interactive: false }).addTo(E.mapa);
+      E.destaque = L.featureGroup([L.polygon(paraLatLngs(x.geom), { color: '#00e5ff', weight: 4, fill: false, interactive: false })]
+        .concat(x.sedeMarcada ? [L.circleMarker([x.lat, x.lon], { radius: 16, color: '#f2b134', weight: 4, fill: false, interactive: false })] : [])).addTo(E.mapa);
     } else if (x.latlngs) {
       E.destaque = L.polyline(x.latlngs, { color: '#00e5ff', weight: 8, opacity: 0.7, interactive: false }).addTo(E.mapa);
     } else {
@@ -1062,9 +1107,16 @@
   function focar(x) {
     var alturaPainel = Math.min(window.innerHeight * 0.55, 480);
     if (window.innerWidth >= 720) alturaPainel = 0;
-    if (x.geom && x.bbox) {
+    if (x.geom && x.bbox && !x.sedeMarcada) {
       E.mapa.fitBounds([[x.bbox[1], x.bbox[0]], [x.bbox[3], x.bbox[2]]],
         { paddingTopLeft: [20, 90], paddingBottomRight: [20, alturaPainel + 20], maxZoom: 17 });
+      return;
+    }
+    if (x.geom && x.bbox) {   // propriedade com sede marcada: centraliza na sede, com zoom que mostra o imóvel
+      var zb = E.mapa.getBoundsZoom(L.latLngBounds([[x.bbox[1], x.bbox[0]], [x.bbox[3], x.bbox[2]]]), false, L.point(40, alturaPainel + 110));
+      var zs = Math.max(Math.min(zb, 17), 13);
+      var ps = E.mapa.project([x.lat, x.lon], zs).add([0, alturaPainel / 2]);
+      E.mapa.setView(E.mapa.unproject(ps, zs), zs);
       return;
     }
     var z = Math.max(E.mapa.getZoom(), 15);
@@ -1118,7 +1170,8 @@
     var html =
       '<p class="ficha-tipo"><span class="bolinha-in" style="background:' + (CORES_ESPECIE[e.especie] || COR_PADRAO) + '"></span>' +
       'Endereço · ' + esc(e.especie) + seloStatus(e.validado, e.id) + '</p>' +
-      '<h2>' + esc(e.titulo) + '</h2>' +
+      '<h2>' + esc(e.titulo) + '</h2>' + (e.subtitulo ? '<p class="subtitulo-ficha">' + esc(e.subtitulo) + '</p>' : '') +
+      (e.ehSede ? '<p class="selo-sede">Sede / ponto de referência da propriedade</p>' : '') +
       (d.OBS_SEGURANCA ? '<div class="alerta"><strong>Segurança:</strong> ' + esc(d.OBS_SEGURANCA) + '</div>' : '') +
       (prop ? '<button class="link-prop" data-abrir-prop="' + esc(prop.id) + '"><span class="marca-prop mini" style="background:' +
               (prop.validado ? COR_PROP.VALIDADO : COR_PROP.NAO_VALIDADO) + '"></span>Dentro de: <strong>' + esc(prop.titulo) + '</strong> ›</button>' : '') +
@@ -1147,9 +1200,9 @@
     destacar(p);
     var rebanho = listaDe(d.REBANHO).join(' · ');
     var operadora = d.SINAL_CELULAR === 'SIM' && d.OPERADORA ? ' (' + d.OPERADORA + ')' : '';
-    var lista = p.ends.slice(0, 30).map(function (e) {
+    var lista = p.ends.slice().sort(function (a, b) { return (b.ehSede ? 1 : 0) - (a.ehSede ? 1 : 0); }).slice(0, 30).map(function (e) {
       return '<li><button class="resultado" data-abrir-end="' + esc(e.id) + '"><span class="bolinha" style="background:' + corEnd(e) + '"></span>' +
-        '<span class="txt"><span class="t1">' + esc(e.d.MORADOR || e.titulo) + '</span><span class="t2">' + esc(e.especie) + '</span></span></button></li>';
+        '<span class="txt"><span class="t1">' + esc(e.titulo) + (e.ehSede ? ' <small class="oficial">sede</small>' : '') + '</span><span class="t2">' + esc([e.titulo !== e.especie ? e.especie : '', e.endereco].filter(Boolean).join(' · ')) + '</span></span></button></li>';
     }).join('');
     var html =
       '<p class="ficha-tipo"><span class="marca-prop mini" style="background:' + (p.validado ? COR_PROP.VALIDADO : COR_PROP.NAO_VALIDADO) + '"></span>' +
@@ -1171,7 +1224,9 @@
       grupo('Imóvel', campo('Município', esc(nomeMunicipio(p.mun))) + campo('Área', b.AREA_HA ? esc(fmtArea(b.AREA_HA)) : '') +
         campo('Módulos fiscais', esc(b.MOD_FISCAL)) + campo('CAR', b.COD_CAR ? '<small>' + esc(b.COD_CAR) + '</small>' : 'Sem CAR (cadastrada em campo)') +
         campo('Situação no CAR', esc(b.CONDICAO)) +
-        campo(p.sedeMarcada ? 'Sede' : 'Centro', esc(p.lat.toFixed(6) + ', ' + p.lon.toFixed(6)) + (p.sedeMarcada ? '<br><small>marcada em campo</small>' : '')) +
+        campo(p.sedeMarcada ? 'Sede' : 'Centro', esc(p.lat.toFixed(6) + ', ' + p.lon.toFixed(6)) +
+          (E.endPorId[d.SEDE_ENDERECO] ? '<br><button class="link-mini" data-abrir-end="' + esc(d.SEDE_ENDERECO) + '">' + esc(E.endPorId[d.SEDE_ENDERECO].endereco || E.endPorId[d.SEDE_ENDERECO].titulo) + ' ›</button>'
+            : p.sedeMarcada ? '<br><small>marcada em campo</small>' : '<br><small>centro do imóvel (CAR) · nenhum endereço marcado como sede</small>')) +
         campo('Distância', distancia(p)) + campo('Como chegar', esc(d.COMO_CHEGAR))) +
       (p.ends.length ? '<h3>Endereços dentro do imóvel (' + p.ends.length + ')</h3><ul class="resultados">' + lista + '</ul>' +
         (p.ends.length > 30 ? '<p class="dica">Mostrando 30.</p>' : '') : '') +
@@ -1332,7 +1387,7 @@
   function abrirFormEnd(e) {
     abrirPainel('<form data-form="end-editar" data-id="' + esc(e.id) + '" novalidate><h2>Atualizar endereço</h2>' +
       '<p class="ficha-tipo">' + esc(e.titulo) + '</p><p class="dica">Informe ao morador que os dados são para uso da Patrulha Rural.</p>' +
-      camposEndereco(e.d) + blocoRede(e) + '<h3>Visita e posição</h3>' + F.caixa('registrarVisita', 'Registrar visita agora', true) +
+      camposEndereco(e.d) + perguntaSede(e) + blocoRede(e) + '<h3>Visita e posição</h3>' + F.caixa('registrarVisita', 'Registrar visita agora', true) +
       opcaoGps(e, 'Mover o ponto para minha posição') + rodapeForm() + '</form>', 'form-end');
   }
   function abrirFormProp(p) {
@@ -1341,6 +1396,26 @@
       camposPropriedade(p.d) + blocoRede(p) + '<h3>Visita e sede</h3>' + F.caixa('registrarVisita', 'Registrar visita agora', true) +
       opcaoGps(p, 'Marcar a sede na minha posição') + rodapeForm() + '</form>', 'form-prop');
   }
+  function perguntaSede(e) {
+    var p = E.propPorId[e.idProp];
+    if (!p) return '';
+    var atual = p.d.SEDE_ENDERECO, outro = atual && atual !== e.id && E.endPorId[atual];
+    return '<h3>Propriedade rural</h3><div class="pergunta-sede">' +
+      F.caixa('SEDE_PROP', 'Este ponto é a <b>sede / ponto de referência</b> da propriedade <b>' + esc(p.titulo) + '</b>', atual === e.id) +
+      '<p class="dica">Marcado, a busca e a navegação para a propriedade levam a este ponto, e não ao centro do imóvel.' +
+      (outro ? ' Hoje a sede marcada é outra: <b>' + esc(outro.titulo) + '</b> (será substituída).' : '') + '</p></div>';
+  }
+  function extrairSede(form, v, novaPosicao) {
+    var marcado = !!v.SEDE_PROP; delete v.SEDE_PROP;
+    if (!form.querySelector('[name=SEDE_PROP]')) return null;
+    var e = E.endPorId[form.getAttribute('data-id')], p = e && E.propPorId[e.idProp];
+    if (!p) return null;
+    var era = p.d.SEDE_ENDERECO === e.id;
+    if (marcado === era && !(marcado && novaPosicao)) return null;
+    var pos = novaPosicao || { lat: e.lat, lon: e.lon };
+    return { tipo: 'PROP_SEDE', alvoId: p.id, enderecoId: e.id, lat: pos.lat, lon: pos.lon, remover: !marcado };
+  }
+
   function abrirFormVisita(x) {
     abrirPainel('<form data-form="visita" data-id="' + esc(x.id) + '" data-tipo="' + x.tipo + '"><h2>Registrar visita</h2>' +
       '<p class="ficha-tipo">' + esc(x.titulo) + '</p>' +
@@ -1409,7 +1484,7 @@
     var locPadrao = p ? String(p.e.base.LOCALIDADE || '') : (ref.localidades[0] ? ref.localidades[0].nome : '');
     var logPadrao = p && p.d <= 1500 ? String(p.e.base.LOGRADOURO || '') : '';
     var blocoLocal = ref.localidades.length
-      ? (p ? '<div class="ref-ibge"><small>Endereço do IBGE mais próximo · ' + fmtDist(p.d) + '</small><b>' + esc(p.e.titulo) + '</b>' +
+      ? (p ? '<div class="ref-ibge"><small>Endereço do IBGE mais próximo · ' + fmtDist(p.d) + '</small><b>' + esc(p.e.endereco || p.e.titulo) + '</b>' +
              (p.e.base.LOCALIDADE ? '<span>' + esc(p.e.base.LOCALIDADE) + '</span>' : '') + '</div>' +
              '<input type="hidden" name="REF_IBGE" value="' + esc(p.e.id) + '">'
            : '<p class="dica">Nenhum endereço do IBGE a menos de 3 km. Escolha a localidade mais próxima.</p>') +
@@ -1527,13 +1602,15 @@
     }
     if (tipo === 'end-editar' || tipo === 'prop-editar') {
       var ehEnd = tipo === 'end-editar', x = ehEnd ? E.endPorId[id] : E.propPorId[id];
+      var novaPos = corrigir ? posGps() : null;
+      var sedeItem = ehEnd ? extrairSede(form, v, novaPos) : null;
       var item = { tipo: ehEnd ? 'END_EDITAR' : 'PROP_EDITAR', alvoId: id, dados: alteracoes(x.d), registrarVisita: registrarVisita };
-      if (corrigir) item.novaPosicao = posGps();
+      if (novaPos) item.novaPosicao = novaPos;
       if (!Object.keys(item.dados).length && !item.novaPosicao) {
-        if (!registrarVisita && !redeItem) throw new Error('Nada foi alterado.');
+        if (!registrarVisita && !redeItem && !sedeItem) throw new Error('Nada foi alterado.');
         item = registrarVisita ? { tipo: ehEnd ? 'END_VISITA' : 'PROP_VISITA', alvoId: id } : null;
       }
-      return concluir(item, redeItem);
+      return concluir(item, [redeItem, sedeItem]);
     }
     if (tipo === 'visita') {
       return concluir({ tipo: form.getAttribute('data-tipo') === 'END' ? 'END_VISITA' : 'PROP_VISITA', alvoId: id, obs: v.obs || '' }, redeItem);
@@ -1562,10 +1639,11 @@
   }
 
   /** Salva e reabre a ficha atualizada (ou fecha, se o registro saiu do mapa). */
-  function concluir(item, extra) {
+  function concluir(item, extras) {
     removerMarcaLocal();
-    if (!item) { item = extra; extra = null; }
-    return registrar(item, extra).then(function (alvo) {
+    extras = (Array.isArray(extras) ? extras : [extras]).filter(Boolean);
+    if (!item) item = extras.shift();
+    return registrar(item, extras).then(function (alvo) {
       if (!alvo) return fecharPainel();
       if (alvo.tipo === 'END' && E.endPorId[alvo.id]) return abrirFichaEnd(E.endPorId[alvo.id], true);
       if (alvo.tipo === 'PROP' && E.propPorId[alvo.id]) return abrirFichaProp(E.propPorId[alvo.id], true);
@@ -1670,8 +1748,9 @@
       var icone = x.tipo === 'PROP'
         ? '<span class="marca-prop mini" style="background:' + (x.validado ? COR_PROP.VALIDADO : COR_PROP.NAO_VALIDADO) + '"></span>'
         : '<span class="bolinha" style="background:' + corEnd(x) + '"></span>';
-      var t1 = x.tipo === 'PROP' ? x.titulo : (x.d.MORADOR ? x.d.MORADOR + ' · ' + x.titulo : x.titulo);
-      var sub = [x.tipo === 'PROP' ? 'Propriedade rural' : x.d.LOCALIDADE, nomeMunicipio(x.mun)].filter(Boolean).join(' · ');
+      var t1 = x.titulo;
+      var sub = (x.tipo === 'PROP' ? ['Propriedade rural' + (x.d.PROPRIETARIO ? ' de ' + x.d.PROPRIETARIO : '')] : [x.endereco || x.especie, x.d.LOCALIDADE])
+        .concat(nomeMunicipio(x.mun)).filter(Boolean).join(' · ');
       var dist = pos ? '<span class="dist">' + esc(fmtDist(distanciaM(pos.lat, pos.lon, x.lat, x.lon))) + '</span>' : '';
       return '<li><button class="resultado" data-resultado="' + x.tipo + '|' + esc(x.id) + '">' + icone +
         '<span class="txt"><span class="t1">' + esc(t1) + '</span><span class="t2">' + esc(sub) + '</span></span>' + dist + '</button></li>';
@@ -1911,7 +1990,7 @@
       '<h3>Integrantes</h3><ul class="resultados">' + pts.slice(0, 60).map(function (e) {
         var ad = adesaoDe(e, r);
         return '<li><button class="resultado" data-abrir-end="' + esc(e.id) + '"><span class="marca-adesao ' + (ad ? 'a-' + ad.toLowerCase() : 'a-pendente') + '"></span>' +
-          '<span class="txt"><span class="t1">' + esc(e.d.MORADOR || e.titulo) + '</span><span class="t2">' + esc([e.especie, e.d.LOCALIDADE].filter(Boolean).join(' · ')) + '</span></span></button></li>';
+          '<span class="txt"><span class="t1">' + esc(e.titulo) + '</span><span class="t2">' + esc([e.endereco, e.d.LOCALIDADE].filter(Boolean).join(' · ')) + '</span></span></button></li>';
       }).join('') + '</ul>' + (pts.length > 60 ? '<p class="dica">… e mais ' + (pts.length - 60) + '.</p>' : '') +
       (admin ? '<div class="acoes"><button class="btn btn-perigo-leve largo" data-rede-remover="' + esc(r.id) + '">Desfazer esta rede</button></div>' : '') +
       '<p class="rodape-ficha">ID ' + esc(r.id) + '</p>';
@@ -2100,7 +2179,7 @@
       '<button class="btn btn-secundario" data-sug-lista>Voltar à lista</button></div>' +
       '<h3>Endereços</h3><ul class="resultados">' + g.ends.slice(0, 40).map(function (e) {
         return '<li><button class="resultado" data-abrir-end="' + esc(e.id) + '"><span class="bolinha" style="background:' + corEnd(e) + '"></span>' +
-          '<span class="txt"><span class="t1">' + esc(e.d.MORADOR || e.titulo) + '</span><span class="t2">' + esc([e.especie, e.d.LOCALIDADE].filter(Boolean).join(' · ')) + '</span></span></button></li>';
+          '<span class="txt"><span class="t1">' + esc(e.titulo) + '</span><span class="t2">' + esc([e.endereco, e.d.LOCALIDADE].filter(Boolean).join(' · ')) + '</span></span></button></li>';
       }).join('') + '</ul>' + (g.ends.length > 40 ? '<p class="dica">… e mais ' + (g.ends.length - 40) + '.</p>' : '');
     abrirPainel(html, 'sugestao');
   }
@@ -2188,7 +2267,7 @@
     return rede.ids.map(function (id) { return E.endPorId[id]; }).filter(Boolean).map(function (e) {
       var p = E.propPorId[e.idProp];
       var nomeProp = p && p.d.NOME_PROPRIEDADE;
-      var partes = [e.d.MORADOR ? nomeProp : '', e.d.NOME_LOCAL, e.titulo, e.d.LOCALIDADE].filter(function (x, k, arr) { return x && arr.indexOf(x) === k; });
+      var partes = [e.d.MORADOR ? nomeProp : '', e.d.NOME_LOCAL, e.endereco, e.d.LOCALIDADE].filter(function (x, k, arr) { return x && arr.indexOf(x) === k; });
       return { e: e, nome: e.d.MORADOR || nomeProp || 'Morador não cadastrado', local: partes.join(' · '),
                adesao: adesaoDe(e, rede) };
     }).sort(function (a, b) { return (b.adesao === 'ADERIU') - (a.adesao === 'ADERIU') || String(a.nome).localeCompare(String(b.nome), 'pt-BR'); });
